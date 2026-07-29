@@ -279,6 +279,26 @@ scripts/
 The entrypoint's `chown` did not run — usually because `ENTRYPOINT` was overridden. Check that your
 run command isn't bypassing `/usr/local/bin/entrypoint.sh`.
 
+### `no kernel image is available for execution on the device`
+
+The GPU is passed through correctly, but the installed PyTorch build contains no compiled kernels
+for your card's compute capability. Recent PyTorch wheels have dropped older architectures — as of
+`torch 2.13`/cu130 the bundled list starts at `sm_75` (Turing), so **Pascal cards (GTX 10xx,
+`sm_61`) and older no longer run**.
+
+This is easy to miss because it does not look like a GPU failure until something tries to compute:
+`/health` still reports `gpu_available: true`, `torch.cuda.is_available()` still returns `True`, and
+the device name resolves. Only an actual kernel launch fails.
+
+Check what your build supports:
+
+```bash
+podman exec voicebox python -c "import torch; print(torch.__version__, torch.cuda.get_arch_list())"
+```
+
+If your card's `sm_` level is absent, either pin an older CUDA wheel that still ships it, or run on
+CPU — the CPU path is unaffected and LuxTTS/Kokoro remain usable.
+
 ### GPU visible on the host but not in the container
 
 Check the CDI spec exists and is current:

@@ -47,6 +47,18 @@ RUN pip install --no-cache-dir --upgrade pip
 
 COPY backend/requirements.txt .
 
+# Every pip step below installs with --prefix=/install, which pip does NOT add to
+# sys.path — so each invocation is blind to what the previous one installed and
+# happily re-resolves torch. Overlapping files then land in the same tree and the
+# last writer wins, which can leave a mixed install (e.g. a 2.13.0 torch package
+# shadowing a pinned 2.6.0 one, with both .dist-info directories present).
+#
+# A constraints file is the cheap fix: it is empty by default (no behaviour
+# change) and the GPU branches below fill it in, so every later step is pinned to
+# the same torch they selected.
+ENV PIP_CONSTRAINT=/tmp/pip-constraints.txt
+RUN touch /tmp/pip-constraints.txt
+
 # ROCm wheel index. Default 6.3 (RDNA1/2/3); set ROCM_VERSION=7.2 for RDNA4.
 ARG ROCM_VERSION=6.3
 
@@ -57,6 +69,29 @@ RUN if [ "$PYTORCH_VARIANT" = "rocm" ]; then \
         --index-url "https://download.pytorch.org/whl/rocm${ROCM_VERSION}" \
         torch torchaudio && \
       printf '[global]\nindex-url = https://download.pytorch.org/whl/rocm%s\nextra-index-url = https://pypi.org/simple\n' "$ROCM_VERSION" > /etc/pip.conf; \
+    fi
+
+# CUDA wheel index, for GPUs the current default PyPI torch no longer supports.
+# Recent wheels have dropped older architectures — torch 2.13/cu130 starts at
+# sm_75 (Turing), so Pascal (GTX 10xx, sm_61) and Maxwell get
+# "no kernel image is available for execution on the device" at the first kernel
+# launch, even though torch.cuda.is_available() reports True.
+#
+# cu124 / torch 2.6.0 ships sm_50-sm_90 and is verified working on a GTX 1080.
+# Newer cards do not need this variant; the default build already covers them.
+ARG CUDA_VERSION=124
+ARG TORCH_VERSION=2.6.0
+
+# Pin torch first and make the CUDA index primary, so the requirements install
+# below keeps this build instead of resolving a newer one from PyPI.
+RUN if [ "$PYTORCH_VARIANT" = "cuda" ]; then \
+      pip install --no-cache-dir --prefix=/install \
+        --index-url "https://download.pytorch.org/whl/cu${CUDA_VERSION}" \
+        "torch==${TORCH_VERSION}" torchaudio && \
+      printf '[global]\nindex-url = https://download.pytorch.org/whl/cu%s\nextra-index-url = https://pypi.org/simple\n' "$CUDA_VERSION" > /etc/pip.conf && \
+      printf 'torch==%s+cu%s\ntorchaudio==%s+cu%s\n' \
+        "$TORCH_VERSION" "$CUDA_VERSION" "$TORCH_VERSION" "$CUDA_VERSION" \
+        > /tmp/pip-constraints.txt; \
     fi
 
 RUN pip install --no-cache-dir --prefix=/install -r requirements.txt

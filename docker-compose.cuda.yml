@@ -4,9 +4,19 @@
 #   Podman:  podman-compose -f docker-compose.yml -f docker-compose.cuda.yml up --build
 #   Docker:  docker compose  -f docker-compose.yml -f docker-compose.cuda.yml up --build
 #
-# No build args are needed: the default (non-ROCm) branch of the Dockerfile
-# installs plain `torch` from PyPI, whose Linux wheel is already the CUDA build.
-# The image has always been CUDA-capable — it was only missing device access.
+# The default (non-ROCm) Dockerfile branch already installs a CUDA-capable torch
+# from PyPI, but recent wheels have dropped older GPU architectures: torch
+# 2.13/cu130 compiles for sm_75 (Turing) and newer only. On a Pascal card the
+# result is a container that looks fine — torch.cuda.is_available() is True and
+# /health reports gpu_available — until the first kernel launch fails with
+# "no kernel image is available for execution on the device".
+#
+# So this overlay pins the `cuda` build variant, which installs torch 2.6.0 from
+# the cu124 index (arch list sm_50-sm_90, verified computing on a GTX 1080).
+#
+# On a Turing-or-newer GPU you do not need the pin. Override it to use the
+# current wheels instead:
+#   PYTORCH_VARIANT= podman-compose -f docker-compose.yml -f docker-compose.cuda.yml up --build
 #
 # Requires the NVIDIA Container Toolkit on the host, with a CDI spec generated:
 #   sudo mkdir -p /etc/cdi
@@ -22,6 +32,13 @@
 
 services:
   voicebox:
+    build:
+      context: .
+      args:
+        PYTORCH_VARIANT: ${PYTORCH_VARIANT-cuda}
+        CUDA_VERSION: ${CUDA_VERSION:-124}
+        TORCH_VERSION: ${TORCH_VERSION:-2.6.0}
+
     devices:
       - nvidia.com/gpu=all
 
