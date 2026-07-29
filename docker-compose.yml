@@ -1,6 +1,11 @@
 # Voicebox — CPU build (default)
-# For AMD ROCm GPU acceleration use the overlay:
-#   docker compose -f docker-compose.yml -f docker-compose.rocm.yml up --build
+#
+# GPU overlays (pick the one matching your hardware):
+#   AMD ROCm:     docker compose -f docker-compose.yml -f docker-compose.rocm.yml up --build
+#   NVIDIA CUDA:  docker compose -f docker-compose.yml -f docker-compose.cuda.yml up --build
+#
+# Podman (rootless) works with the same files — substitute `podman-compose`.
+# See docs/content/docs/overview/podman.mdx for the WSL2 specifics.
 
 services:
   voicebox:
@@ -14,13 +19,15 @@ services:
       - "127.0.0.1:17600:17493"
 
     volumes:
+      # Ordered parent-first: /app/data must be established before the
+      # ./output bind nested inside it, or the nested mount can be shadowed.
+      # Named volume for profiles, DB, cache (persists across container restarts)
+      - voicebox-data:/app/data
+
       # Bind-mount for generated audio (customize the host path as needed)
       # Host side:      ./output/
       # Container side: /app/data/generations/
       - ./output:/app/data/generations
-
-      # Named volume for profiles, DB, cache (persists across container restarts)
-      - voicebox-data:/app/data
 
       # HuggingFace model cache (so models aren't re-downloaded on rebuild)
       - huggingface-cache:/home/voicebox/.cache/huggingface
@@ -29,14 +36,26 @@ services:
       - LOG_LEVEL=info
       - NUMBA_CACHE_DIR=/tmp/numba_cache
 
+    # Declared here, not just in the Dockerfile: Podman builds OCI-format images
+    # by default and silently drops the image-level HEALTHCHECK ("not supported
+    # for OCI image format and will be ignored"). At the compose layer it is
+    # applied at container-create time by both engines.
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:17493/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
     networks:
       - voicebox-net
 
-    deploy:
-      resources:
-        limits:
-          cpus: '4'
-          memory: 8G
+    # NOTE: `deploy.resources` is a Swarm-only key — plain `docker compose` and
+    # `podman-compose` both ignore it, so the limits below are the ones that
+    # actually apply. Raise them to suit your host.
+    mem_limit: 8g
+    cpus: 4.0
+    shm_size: 1g
 
 networks:
   voicebox-net:

@@ -1,0 +1,307 @@
+---
+title: "Podman Deployment"
+description: "Run Voicebox under rootless Podman, including native Podman on WSL2"
+---
+
+## Overview
+
+Voicebox runs as a headless server with a full web UI under [Podman](https://podman.io/) — no
+desktop app and no Docker daemon required. This page is self-contained: everything you need to
+build, run, GPU-accelerate, and auto-start Voicebox under Podman is here.
+
+Podman is a good fit for this workload because it is **rootless** and **daemonless**. The server
+already drops to a non-root `voicebox` user inside the container; rootless Podman means the whole
+stack never holds root on the host either.
+
+<Callout type="info">
+  Verified against Podman 6.x with `podman-compose` 1.6.x, including native Podman inside WSL2.
+  Podman's built-in `podman compose` wrapper delegates to whichever provider it finds, so either
+  entry point works.
+</Callout>
+
+## Quick Start
+
+```bash
+git clone https://github.com/jamiepine/voicebox.git
+cd voicebox
+podman-compose up --build
+```
+
+Open [http://localhost:17600](http://localhost:17600).
+
+<Callout type="warn">
+  Note the port. `docker-compose.yml` maps host **17600** to the container's 17493, deliberately
+  leaving 17493 free for a desktop or dev Voicebox on the same machine. If you'd rather the
+  container own 17493, change the mapping to `"127.0.0.1:17493:17493"` — but stop the other
+  instance first.
+</Callout>
+
+## How it works
+
+The image is a 3-stage build: the React SPA is compiled with Bun and Vite, Python dependencies and
+TTS model packages are installed, and the two are combined into a runtime image serving the FastAPI
+backend. The backend serves the web UI itself when the built frontend is present, so all API routes
+behave exactly as they do in the desktop app.
+
+Base images are fully qualified (`docker.io/library/python:3.11-slim`) because Podman does not
+resolve unqualified short names the way Docker implicitly does.
+
+## Configuration
+
+### `deploy:` is ignored — use `mem_limit` / `cpus`
+
+`deploy.resources.limits` is a **Swarm** key. Neither `podman-compose` nor plain `docker compose`
+applies it, so a compose file that only sets limits there is running with **no limits at all**.
+Voicebox's `docker-compose.yml` therefore uses the keys that are honoured:
+
+```yaml
+    mem_limit: 8g
+    cpus: 4.0
+    shm_size: 1g
+```
+
+This matters more than it sounds. TTS models are memory-hungry, and an unlimited container on a
+memory-constrained host will take the whole box down with it rather than being OOM-killed on its
+own.
+
+### Volume ownership
+
+A freshly created named volume is root-owned, but the server runs as the non-root `voicebox` user —
+so model downloads and the SQLite database fail with permission errors on first boot.
+
+Voicebox handles this in its entrypoint, which `chown`s the data and cache mount roots while it
+still has root, before `gosu` drops privileges. No action needed, and no Podman-specific `:U` mount
+flag (which Docker would reject).
+
+### Nested mounts
+
+`./output` is mounted *inside* `/app/data`, which is itself a named volume. The compose file lists
+the parent first so the nested bind is applied on top of it rather than being shadowed. Preserve
+that ordering if you edit the volume list.
+
+## GPU acceleration
+
+### NVIDIA (CUDA)
+
+Use the CUDA overlay:
+
+```bash
+podman-compose -f docker-compose.yml -f docker-compose.cuda.yml up --build
+```
+
+This requires the NVIDIA Container Toolkit and a **CDI** spec on the host:
+
+```bash
+sudo mkdir -p /etc/cdi
+sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+```
+
+CDI (`devices: [nvidia.com/gpu=all]`) is the right mechanism for two reasons: Compose's
+`deploy.resources.reservations.devices` syntax is Swarm-only and Podman ignores it, and CDI works
+**rootless**, which the legacy `--gpus` / nvidia-runtime path does not.
+
+Regenerate the spec after any driver update.
+
+<Callout type="info">
+  No special build argument is needed. The default (non-ROCm) Dockerfile branch installs plain
+  `torch` from PyPI, and the Linux wheel is already the CUDA build — the image has always been
+  CUDA-capable, it was only ever missing device access.
+</Callout>
+
+### AMD (ROCm)
+
+```bash
+podman-compose -f docker-compose.yml -f docker-compose.rocm.yml up --build
+```
+
+The overlay binds `/dev/kfd` and `/dev/dri`, and the entrypoint joins whichever host groups own
+those nodes at runtime — so no `group_add` or `RENDER_GID`/`VIDEO_GID` environment variables are
+needed. Set `HSA_OVERRIDE_GFX_VERSION` for your GPU family, and `ROCM_VERSION=7.2` for RDNA4
+(the default 6.3 covers RDNA1–3).
+
+### CPU only
+
+Plain `podman-compose up` runs on CPU. Generation is slower but works; LuxTTS is the fastest engine
+on CPU.
+
+## Volumes
+
+| Volume | Container path | Purpose |
+|---|---|---|
+| `voicebox-data` | `/app/data` | Profiles, database, cache |
+| `./output` | `/app/data/generations` | Generated audio (bind-mount, readable from the host) |
+| `huggingface-cache` | `/home/voicebox/.cache/huggingface` | Downloaded models |
+
+Keep `huggingface-cache` — without it every rebuild re-downloads the models.
+
+## Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `LOG_LEVEL` | `info` | Logging verbosity (`debug`, `info`, `warning`, `error`) |
+| `VOICEBOX_MODELS_DIR` | (HuggingFace cache) | Custom path for model storage |
+| `VOICEBOX_CORS_ORIGINS` | (local origins) | Additional CORS origins, comma-separated |
+
+## Security
+
+The container binds to `127.0.0.1` only and the server runs as the non-root `voicebox` user; under
+rootless Podman it holds no host root at all. A `/health` healthcheck restarts the server if it
+hangs, and CORS is limited to local origins.
+
+To reach it from other machines, change the binding to `"0.0.0.0:17600:17493"`.
+
+<Callout type="warn">
+  The API — including `/mcp` — has **no authentication**. Anything that can reach the port can
+  generate speech in your cloned voices. Only expose it to trusted networks, and put a reverse proxy
+  with TLS and auth in front of it if you must publish it.
+</Callout>
+
+## Podman on WSL2
+
+Podman runs natively inside a WSL2 distribution — no `podman machine`, since WSL is already the
+Linux VM.
+
+### GPU passthrough
+
+WSL exposes the GPU as `/dev/dxg`, **not** `/dev/dri` or `/dev/kfd`, with the driver libraries
+bind-mounted at `/usr/lib/wsl/lib`. Two consequences:
+
+- **NVIDIA works.** `nvidia-ctk` understands the WSL layout and the generated CDI spec wires up
+  `/dev/dxg` and the WSL driver libraries. Verify with:
+
+  ```bash
+  podman exec voicebox python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+  ```
+
+- **The ROCm overlay does not apply.** It binds device nodes that do not exist under WSL, so the
+  container fails to start. AMD GPU users should run Voicebox on native Linux.
+
+<Callout type="warn">
+  Write the CDI spec to `/etc/cdi`, not `/var/run/cdi`. The latter is tmpfs under WSL and is lost
+  every time WSL restarts, which shows up later as a container that mysteriously stopped seeing the
+  GPU.
+</Callout>
+
+### Memory
+
+WSL2 caps its VM's RAM independently of Windows. The docs' 8 GB minimum for a single engine is a
+*container* figure — the WSL VM needs headroom on top of that, plus whatever else you run in it.
+
+Set it on the Windows side in `C:\Users\<you>\.wslconfig`:
+
+```ini
+[wsl2]
+memory=16GB
+```
+
+Then `wsl --shutdown` and restart. Without this the container is OOM-killed mid-generation, which
+surfaces as the server dying with no obvious error in its own logs.
+
+### Reaching the container from Windows
+
+Ports bound to `127.0.0.1` inside WSL2 are reachable from Windows at `localhost` via WSL's port
+forwarding, so a Windows browser or MCP client can use `http://127.0.0.1:17600` unchanged. If you
+have `networkingMode=mirrored` set, this is direct rather than forwarded.
+
+## Auto-start with Quadlet
+
+Podman's native equivalent of `restart: unless-stopped` is a systemd unit. With user systemd
+running, generate a Quadlet unit at
+`~/.config/containers/systemd/voicebox.container`:
+
+```ini
+[Unit]
+Description=Voicebox
+
+[Container]
+Image=localhost/voicebox_voicebox:latest
+PublishPort=127.0.0.1:17600:17493
+Volume=voicebox-data:/app/data
+Volume=huggingface-cache:/home/voicebox/.cache/huggingface
+AddDevice=nvidia.com/gpu=all
+Environment=LOG_LEVEL=info
+
+[Service]
+Restart=always
+
+[Install]
+WantedBy=default.target
+```
+
+Then:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user start voicebox
+loginctl enable-linger "$USER"   # start without an active login session
+```
+
+<Callout type="info">
+  On WSL2, systemd must be enabled in `/etc/wsl.conf` (`[boot]` / `systemd=true`) for this to work.
+</Callout>
+
+## MCP
+
+The [MCP server](/overview/mcp-server) is mounted at `/mcp` in the same process, so a containerised
+Voicebox exposes it on whatever host port you mapped:
+
+```bash
+claude mcp add voicebox-podman \
+  --transport http \
+  --url http://127.0.0.1:17600/mcp \
+  --header "X-Voicebox-Client-Id: claude-code-podman"
+```
+
+If you run both a container and a desktop/dev instance, give each a **distinct**
+`X-Voicebox-Client-Id`. That header keys the per-client voice binding, so a shared id means the two
+instances overwrite each other's voice and engine settings.
+
+<Callout type="warn">
+  A container has no audio device. `voicebox.speak` renders the audio and broadcasts the
+  `speak-start` event, but playback happens in whatever **client** has the UI open — a browser tab
+  pointed at the container. A fully headless container generates audio that nothing plays; fetch it
+  from the Captures tab or `GET /audio/<generation_id>` instead.
+</Callout>
+
+## Troubleshooting
+
+### `COPY scripts/...: no such file or directory` at build time
+
+`.dockerignore` excludes `scripts/`, so the entrypoint must be explicitly re-included:
+
+```
+scripts/
+!scripts/rocm-entrypoint.sh
+```
+
+### Permission denied writing to the model cache
+
+The entrypoint's `chown` did not run — usually because `ENTRYPOINT` was overridden. Check that your
+run command isn't bypassing `/usr/local/bin/entrypoint.sh`.
+
+### GPU visible on the host but not in the container
+
+Check the CDI spec exists and is current:
+
+```bash
+ls /etc/cdi/
+podman run --rm --device nvidia.com/gpu=all docker.io/library/alpine ls /dev/dxg
+```
+
+On WSL, re-run `nvidia-ctk cdi generate` after a restart if you wrote the spec to `/var/run/cdi`.
+
+### Container is killed mid-generation
+
+The host or the WSL VM ran out of memory. Raise `memory=` in `.wslconfig`, or lower `mem_limit` so
+the container is capped before it destabilises the host.
+
+## Next steps
+
+<Cards>
+  <Card title="MCP Server" href="/overview/mcp-server">
+    Wire the containerised Voicebox into Claude Code, Cursor, or any MCP client.
+  </Card>
+  <Card title="GPU Acceleration" href="/overview/gpu-acceleration">
+    How Voicebox detects and uses your GPU.
+  </Card>
+</Cards>

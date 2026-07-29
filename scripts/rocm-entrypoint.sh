@@ -12,4 +12,14 @@ for dev in /dev/kfd /dev/dri/render*; do
     }
     usermod -aG "$grp" voicebox
 done
+
+# Freshly-created volumes land root-owned, which the non-root app user cannot
+# write — model downloads and the SQLite DB then fail. Claim them here, while we
+# still have root. Only fixes the mount roots, so it stays cheap on restarts
+# with a warm model cache.
+for dir in /app/data /app/data/generations /home/voicebox/.cache/huggingface; do
+    [ -d "$dir" ] || mkdir -p "$dir"
+    [ "$(stat -c %u "$dir")" = "$(id -u voicebox)" ] || chown voicebox:voicebox "$dir"
+done
+
 exec gosu voicebox "$@"

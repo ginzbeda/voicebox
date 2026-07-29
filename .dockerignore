@@ -9,6 +9,8 @@ landing/
 docs/
 mlx-test/
 scripts/
+# ...except the runtime entrypoint, which the Dockerfile COPYs.
+!scripts/rocm-entrypoint.sh
 
 # Dependencies & build artifacts (rebuilt in Docker)
 node_modules/

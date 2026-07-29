@@ -15,7 +15,16 @@ cd voicebox
 docker compose up
 ```
 
-Open [http://localhost:17493](http://localhost:17493) in your browser. The full Voicebox UI is served directly from the backend.
+Open [http://localhost:17600](http://localhost:17600) in your browser. The full Voicebox UI is served directly from the backend.
+
+<Callout type="info">
+  The container listens on 17493 internally, but the host side is mapped to **17600** so a desktop
+  or dev Voicebox can keep 17493 for itself. Change the mapping in `docker-compose.yml` if you'd
+  rather the container own 17493.
+</Callout>
+
+Running Podman instead? See the [Podman guide](/overview/podman) — the same files work, with a few
+rootless and WSL2 specifics.
 
 <Callout type="info">
   The first build takes a few minutes (compiling the frontend, installing Python dependencies). Subsequent starts are fast thanks to Docker layer caching.
@@ -44,19 +53,26 @@ services:
     container_name: voicebox
     restart: unless-stopped
     ports:
-      - "127.0.0.1:17493:17493"
+      - "127.0.0.1:17600:17493"
     volumes:
-      - ./output:/app/data/generations
       - voicebox-data:/app/data
+      - ./output:/app/data/generations
       - huggingface-cache:/home/voicebox/.cache/huggingface
     environment:
       - LOG_LEVEL=info
-    deploy:
-      resources:
-        limits:
-          cpus: '4'
-          memory: 8G
+    mem_limit: 8g
+    cpus: 4.0
+    shm_size: 1g
 ```
+
+<Callout type="warn">
+  Resource limits are set with `mem_limit` / `cpus`, **not** `deploy.resources.limits`. The
+  `deploy:` block is a Swarm-only key that plain `docker compose` and `podman-compose` both ignore —
+  a compose file that only sets limits there is running with no limits at all.
+</Callout>
+
+`./output` is mounted *inside* the `/app/data` volume, so the parent is listed first; keep that
+ordering if you edit the list.
 
 ### Exposing to Your Network
 
@@ -64,7 +80,7 @@ By default the container only listens on `127.0.0.1`. To allow other machines on
 
 ```yaml
 ports:
-  - "0.0.0.0:17493:17493"
+  - "0.0.0.0:17600:17493"
 ```
 
 <Callout type="warn">
@@ -84,11 +100,8 @@ ports:
 The default compose file limits the container to 4 CPUs and 8GB RAM. Adjust these based on your hardware:
 
 ```yaml
-deploy:
-  resources:
-    limits:
-      cpus: '8'
-      memory: 16G
+mem_limit: 16g
+cpus: 8.0
 ```
 
 <Callout type="info">
@@ -109,21 +122,32 @@ The `huggingface-cache` volume is important -- without it, models would be re-do
 
 ### NVIDIA GPU (CUDA)
 
-To use your NVIDIA GPU inside the container, install the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) and add GPU access to your compose file:
+Install the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html), generate a CDI spec, then use the CUDA overlay:
+
+```bash
+sudo mkdir -p /etc/cdi
+sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+
+docker compose -f docker-compose.yml -f docker-compose.cuda.yml up --build
+```
+
+The overlay requests the GPU via CDI:
 
 ```yaml
 services:
   voicebox:
-    build: .
-    # ... existing config ...
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+    devices:
+      - nvidia.com/gpu=all
 ```
+
+<Callout type="info">
+  CDI is used rather than `deploy.resources.reservations.devices` because that Compose syntax is
+  Swarm-only and Podman ignores it. CDI also works rootless. Regenerate the spec after a driver
+  update.
+
+  No special build argument is needed — the default Dockerfile branch installs plain `torch` from
+  PyPI, whose Linux wheel is already the CUDA build.
+</Callout>
 
 ### AMD GPU (ROCm)
 
@@ -170,7 +194,7 @@ server {
     auth_basic_user_file /etc/nginx/.htpasswd;
 
     location / {
-        proxy_pass http://127.0.0.1:17493;
+        proxy_pass http://127.0.0.1:17600;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
     }
@@ -203,17 +227,14 @@ volumes:
 TTS models are large. If the container is killed by the OOM killer, increase the memory limit:
 
 ```yaml
-deploy:
-  resources:
-    limits:
-      memory: 16G
+mem_limit: 16g
 ```
 
 ### Port already in use
 
 ```bash
-# Check what's using port 17493
-lsof -i :17493
+# Check what's using the host port
+lsof -i :17600
 
 # Or use a different port
 ports:
@@ -226,7 +247,7 @@ We plan to publish prebuilt Docker images to GitHub Container Registry so you wo
 
 ```bash
 # Not available yet — coming in a future release
-docker run -p 17493:17493 ghcr.io/jamiepine/voicebox:latest
+docker run -p 17600:17493 ghcr.io/jamiepine/voicebox:latest
 ```
 
 The CPU image will be ~3-4 GB (Python + PyTorch + TTS packages). A separate CUDA tag (~6-8 GB) will be available for NVIDIA GPU users. This is normal for ML containers.
@@ -235,6 +256,6 @@ For now, use `docker compose up` to build from source as described above.
 
 ## Connecting the Desktop App
 
-You can also use the desktop app as a frontend for a Docker-hosted backend. In the desktop app, go to **Settings -> Server**, enable **Remote Mode**, and enter `http://<server-ip>:17493`.
+You can also use the desktop app as a frontend for a Docker-hosted backend. In the desktop app, go to **Settings -> Server**, enable **Remote Mode**, and enter `http://<server-ip>:17600`.
 
 See the [Remote Mode guide](/overview/remote-mode) for details.

@@ -5,6 +5,7 @@
     "introduction",
     "installation",
     "docker",
+    "podman",
     "quick-start",
     "gpu-acceleration",
     "dictation",

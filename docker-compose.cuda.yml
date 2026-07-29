@@ -1,0 +1,36 @@
+---
+# CUDA (NVIDIA GPU) overlay for Voicebox
+#
+#   Podman:  podman-compose -f docker-compose.yml -f docker-compose.cuda.yml up --build
+#   Docker:  docker compose  -f docker-compose.yml -f docker-compose.cuda.yml up --build
+#
+# No build args are needed: the default (non-ROCm) branch of the Dockerfile
+# installs plain `torch` from PyPI, whose Linux wheel is already the CUDA build.
+# The image has always been CUDA-capable — it was only missing device access.
+#
+# Requires the NVIDIA Container Toolkit on the host, with a CDI spec generated:
+#   sudo mkdir -p /etc/cdi
+#   sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+#
+# Regenerate the spec after a driver update. On WSL2 write it to /etc/cdi, not
+# /var/run/cdi — the latter is tmpfs and is lost when WSL restarts.
+#
+# CDI (`nvidia.com/gpu=all`) is used instead of Compose's
+# `deploy.resources.reservations.devices`, which is a Swarm-only key that
+# podman-compose ignores. CDI also works rootless, which the legacy
+# `--gpus` / nvidia runtime path does not.
+
+services:
+  voicebox:
+    devices:
+      - nvidia.com/gpu=all
+
+    security_opt:
+      # The CDI-injected driver libraries sit outside the container's SELinux
+      # label. Harmless on WSL2 (no SELinux); required on Fedora/RHEL hosts.
+      - label=disable
+
+    environment:
+      # Pascal (GTX 10xx) and older need this unset/permissive; newer cards can
+      # tighten it. Left explicit so the allocator behaviour is reproducible.
+      - PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.8,max_split_size_mb:512
