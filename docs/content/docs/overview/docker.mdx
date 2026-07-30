@@ -60,7 +60,7 @@ services:
       - huggingface-cache:/home/voicebox/.cache/huggingface
     environment:
       - LOG_LEVEL=info
-    mem_limit: 8g
+    mem_limit: 5g
     cpus: 4.0
     shm_size: 1g
 ```
@@ -224,11 +224,22 @@ volumes:
 
 ### Out of memory
 
-TTS models are large. If the container is killed by the OOM killer, increase the memory limit:
+TTS models are large. If the container is killed by the OOM killer, raise the limit — but only as far
+as the host can actually spare:
 
 ```yaml
 mem_limit: 16g
 ```
+
+<Callout type="warn">
+  Raising `mem_limit` past your free RAM makes things **worse**, not better. A cap the host cannot
+  honour never trips, so the kernel's OOM killer picks a victim instead — which may be another
+  container, or enough of the system to take the box down. Keep the cap below free memory so this
+  container fails alone and predictably, and add real RAM (or raise the VM's memory) to go higher.
+</Callout>
+
+Choosing a lighter engine is usually the bigger lever: Kokoro (82M) needs a fraction of what the
+Qwen or HumeAI models do.
 
 ### Port already in use
 

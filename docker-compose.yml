@@ -53,7 +53,13 @@ services:
     # NOTE: `deploy.resources` is a Swarm-only key — plain `docker compose` and
     # `podman-compose` both ignore it, so the limits below are the ones that
     # actually apply. Raise them to suit your host.
-    mem_limit: 8g
+    #
+    # Keep mem_limit BELOW the host's free memory. A cap set above what the host
+    # can actually spare never trips, so the kernel's OOM killer picks the victim
+    # instead — and it may not pick this container. A cap under free RAM makes
+    # this container fail predictably and alone. 5g suits a 8GB-capped WSL2 VM;
+    # raise it alongside `memory=` in .wslconfig, not ahead of it.
+    mem_limit: 5g
     cpus: 4.0
     shm_size: 1g
 

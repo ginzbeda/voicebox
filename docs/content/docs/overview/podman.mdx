@@ -55,7 +55,7 @@ applies it, so a compose file that only sets limits there is running with **no l
 Voicebox's `docker-compose.yml` therefore uses the keys that are honoured:
 
 ```yaml
-    mem_limit: 8g
+    mem_limit: 5g
     cpus: 4.0
     shm_size: 1g
 ```
@@ -191,11 +191,24 @@ Set it on the Windows side in `C:\Users\<you>\.wslconfig`:
 
 ```ini
 [wsl2]
-memory=16GB
+memory=12GB
+swap=4GB
 ```
 
-Then `wsl --shutdown` and restart. Without this the container is OOM-killed mid-generation, which
-surfaces as the server dying with no obvious error in its own logs.
+Then `wsl --shutdown` and restart. Without enough headroom the container is OOM-killed
+mid-generation, which surfaces as the server dying with no obvious error in its own logs.
+
+Pick the number as a fraction of your **host** RAM, not an absolute: WSL2 defaults to **50%**, and
+50–75% is the usual working range. On a 16 GB machine that means 8 GB (the default) up to about
+12 GB. Never set it to your full physical RAM — that starves Windows. `memory` is a **ceiling, not a
+reservation**: the VM grows on demand and, with `autoMemoryReclaim`, hands memory back, so a higher
+cap costs little while idle. `swap` defaults to 25% of `memory`.
+
+<Callout type="warn">
+  Keep the container's `mem_limit` **below** the VM's free memory. A cap higher than the host can
+  spare never trips, so the kernel's OOM killer chooses a victim instead — possibly not this
+  container. A cap under free RAM makes Voicebox fail predictably and alone.
+</Callout>
 
 ### Reaching the container from Windows
 
