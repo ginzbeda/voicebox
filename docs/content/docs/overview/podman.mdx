@@ -278,6 +278,41 @@ instances overwrite each other's voice and engine settings.
 
 ## Troubleshooting
 
+### MCP: "Failed to connect", or a browser shows "Not Found"
+
+Two separate traps, both easy to misread as a broken deployment.
+
+**The URL needs a trailing slash.** The MCP app is mounted at `/mcp`, and only the exact path
+answers JSON-RPC:
+
+```bash
+curl -o /dev/null -w '%{http_code}\n' -X POST \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}' \
+  http://127.0.0.1:17600/mcp/     # 200 — with the slash
+                                  # 405 — without it
+```
+
+So configure `http://<host>:17600/mcp/`, slash included. Without it the client reports
+**"Failed to connect"** even though the server is perfectly healthy.
+
+**A browser cannot test this endpoint.** `GET /mcp` returns `200` — but that is the SPA catch-all
+serving `index.html`, and the web app's router then renders its own **"Not Found"** page, which
+looks like the endpoint is missing. `GET /mcp/` returns `406` (no `Accept: text/event-stream`).
+Streamable HTTP is a JSON-RPC **POST** transport with no browsable page; use the `curl` above.
+
+### Reaching the MCP server from another container
+
+Use the **container** port, not the published one. `docker-compose.yml` maps
+`127.0.0.1:17600:17493`, so 17600 exists only on the host — on a podman network there is nothing
+listening there. From a sibling container the URL is `http://voicebox:17493/mcp/`.
+
+If the calling container sits behind an HTTP proxy (`HTTP_PROXY`/`HTTPS_PROXY`), add the target to
+its `NO_PROXY` or the request is proxied and answered with `403 Filtered`, which MCP clients surface
+as *"Needs authentication"*. Podman's aardvark-dns also publishes a `<name>.dns.podman` FQDN, so a
+`NO_PROXY` that already lists `.dns.podman` covers it with no config change.
+
 ### `COPY scripts/...: no such file or directory` at build time
 
 `.dockerignore` excludes `scripts/`, so the entrypoint must be explicitly re-included:
