@@ -95,6 +95,22 @@ RUN if [ "$PYTORCH_VARIANT" = "cuda" ]; then \
     fi
 
 RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+# k2, for LuxTTS. Without it LuxTTS logs "Failed import k2 ... Swoosh functions
+# will fallback to PyTorch implementation, leading to slower speed and higher
+# memory consumption" — and that fallback is heavy enough to OOM a small host.
+#
+# k2 wheels are built against an exact (CUDA, torch, cpython) triple, so this is
+# pinned to the same CUDA_VERSION/TORCH_VERSION selected above and only installs
+# for the cuda variant. If you change either ARG, pick the matching wheel from
+# https://k2-fsa.github.io/k2/cuda.html or this install will fail.
+ARG K2_VERSION=1.24.4.dev20260625
+RUN if [ "$PYTORCH_VARIANT" = "cuda" ]; then \
+      pip install --no-cache-dir --prefix=/install --no-deps \
+        --find-links https://k2-fsa.github.io/k2/cuda.html \
+        "k2==${K2_VERSION}+cuda12.4.torch${TORCH_VERSION}"; \
+    fi
+
 RUN pip install --no-cache-dir --prefix=/install --no-deps chatterbox-tts
 RUN pip install --no-cache-dir --prefix=/install --no-deps hume-tada
 RUN pip install --no-cache-dir --prefix=/install \

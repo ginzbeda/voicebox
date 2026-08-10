@@ -1,0 +1,22 @@
+[Unit]
+Description=Voicebox pod - local TTS backend with web UI and MCP server
+
+[Pod]
+PodName=voicebox
+Network=voicebox.network
+# Voicebox is reached over the published loopback port by Claude Code sessions running
+# on the host, which is the only consumer. It deliberately does NOT join any agent
+# network: if a containerised agent ever needs the MCP server, join Voicebox to that
+# agent's network (add a `Network=` line here), never the agent to this one — this
+# bridge has egress, and agent networks are typically Internal=true on purpose.
+
+# Podman only allows port publishing at pod-creation time, not on pod members — same
+# constraint as media.pod. Host side is 17600 so a desktop/dev Voicebox can keep 17493.
+#
+# Loopback-only is load-bearing: the API and /mcp have NO authentication, and the
+# browser mic capture the web UI needs a secure context, which 127.0.0.1 satisfies and
+# a plain-HTTP LAN address does not.
+PublishPort=127.0.0.1:17600:17493
+
+[Install]
+WantedBy=default.target
