@@ -359,6 +359,94 @@ await voicebox.speak({
 
 Full API documentation available at `http://127.0.0.1:17493/docs`.
 
+### Voice for Claude Code
+
+A full voice loop with Claude Code needs both directions, and they are separate
+systems:
+
+| Direction | Provided by | Requires |
+|---|---|---|
+| **You → Claude** (speech to text) | Claude Code's built-in `/voice` — hold-to-talk dictation | SoX and a working **microphone** |
+| **Claude → you** (text to speech) | Voicebox, via the hooks below and `/say` | A working **audio output** device |
+
+> `/voice` is Claude Code's own dictation command and has nothing to do with
+> Voicebox. Our control command is `/say` to avoid the collision.
+
+**Important:** Voicebox generates audio server-side but never plays it —
+playback belongs to the client. The desktop app plays agent speech itself, but a
+**headless or containerised backend has nobody doing it**, so speech is generated
+and silently discarded. `scripts/claude/voicebox-play.sh` is what closes that gap.
+
+#### Install
+
+```bash
+just install-claude-integration --merge   # symlinks hooks, merges settings.json
+export VOICEBOX_PORT=17600                # only if not on the default 17493
+/say test                                 # should speak
+```
+
+The installer symlinks into `~/.claude/`, which lives outside this repo, so the
+repo stays the source of truth and `git pull` updates the installed copy. It
+appends to `settings.json` rather than replacing, backs up first, is idempotent,
+and supports `--uninstall`. Omit `--merge` to print the block and paste it
+yourself.
+
+Three hooks are installed:
+
+| Hook | Speaks | Default |
+|---|---|---|
+| `Stop` | The final response of each turn | on |
+| `Notification` | Permission prompts and idle waits | on |
+| `SubagentStop` | Background agent completions | **off** — set `VOICEBOX_SPEAK_SUBAGENTS=1` |
+
+`SubagentStop` is off because a single turn can fan out many agents, and
+playback is serialised — unthrottled, it queues minutes of speech.
+
+#### `/say`
+
+```
+/say on | off | status | stop | list | test
+/say profile <name>          bind this client to a voice
+/say <text>                  speak it now (ignores the on/off toggle)
+```
+
+`/say status` is the first thing to run when something is wrong: it reports the
+toggle, backend reachability, the resolved voice, and whether a usable audio
+player exists.
+
+#### Configuration
+
+All optional; the defaults suit a local desktop install.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `VOICEBOX_URL` | `http://127.0.0.1:17600` | Backend base URL for the hooks |
+| `VOICEBOX_CLIENT_ID` | `claude-code` | Which per-client voice binding to use |
+| `VOICEBOX_MAXCHARS` | `400` | Cap on spoken length — Voicebox generates in real time, so an uncapped answer can produce minutes of audio |
+| `VOICEBOX_SPEAK_SUBAGENTS` | `0` | Announce subagent completions |
+| `VOICEBOX_PLAYER` | auto | Force a player command |
+| `VOICEBOX_STATE_DIR` | `~/.local/state/voicebox` | Toggle and circuit-breaker state |
+
+If Voicebox is unreachable the hooks trip a circuit breaker and skip entirely
+for 60 seconds, so a stopped backend costs each turn milliseconds rather than a
+connect timeout.
+
+#### Hearing nothing?
+
+```bash
+just voice-doctor      # or ./scripts/check-wsl-audio.sh
+```
+
+It probes each layer — WSLg socket, `/dev/snd`, PulseAudio tools, then real
+playback and capture — and names the first one actually broken. It does **not**
+trust exit codes: `ffplay` returns 0 even when it cannot open the audio device,
+so a naive check reports success into a dead sink.
+
+The common case is **WSL without WSLg audio**, where there is no sound device at
+all and both `/voice` and Voicebox playback fail. Fix by adding
+`guiApplications=true` under `[wsl2]` in `%USERPROFILE%\.wslconfig`, installing
+`pulseaudio-utils`, and running `wsl --shutdown`.
+
 ---
 
 ## Tech Stack
