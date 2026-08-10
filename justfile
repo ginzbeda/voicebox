@@ -315,6 +315,16 @@ fix-python: _ensure-venv
 test: _ensure-venv
     {{ venv_bin }}/python -m pytest {{ backend_dir }}/tests -v
 
+# Install the Voicebox hooks and /say command into ~/.claude (pass --merge to edit settings.json)
+[unix]
+install-claude-integration *ARGS:
+    ./scripts/claude/install.sh {{ ARGS }}
+
+# Diagnose audio playback and capture (Voicebox output / Claude Code /voice input)
+[unix]
+voice-doctor:
+    ./scripts/check-wsl-audio.sh
+
 # E2E: generate with every TTS model against the frozen binary (pass extra flags like --only kokoro)
 [unix]
 test-models *ARGS: _ensure-venv
