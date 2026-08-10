@@ -99,13 +99,31 @@ fi
 
 say
 say "== capture probe (needed by Claude Code /voice) =="
+# Opening the device successfully is not the same as receiving audio. Under
+# WSLg the RDP source connects happily and then delivers digital silence when
+# Windows' default recording device is one the host cannot tap — a virtual
+# mixer output, typically. Dictation then reports "no speech detected" while
+# every layer here looks healthy, so measure the samples rather than the exit
+# status.
 if command -v sox >/dev/null 2>&1; then
-    if err=$(timeout 10 sox -d -n trim 0 0.2 2>&1) && ! printf '%s' "$err" | grep -qi 'fail\|no default'; then
-        ok "captured 0.2s from the default input"
-        in_ok=1
+    cap=$(mktemp -t voicebox-capture-XXXXXX.wav)
+    if err=$(timeout 10 sox -d "$cap" trim 0 1 2>&1) && ! printf '%s' "$err" | grep -qi 'fail\|no default'; then
+        peak=$(sox "$cap" -n stat 2>&1 | awk '/Maximum amplitude/ {print $3}')
+        # Room tone on a live mic sits well above this; a dead channel is ~1e-5.
+        if awk -v p="${peak:-0}" 'BEGIN {exit !(p > 0.0005)}'; then
+            ok "captured 1s from the default input (peak amplitude $peak)"
+            in_ok=1
+        else
+            bad "input device opens but delivers SILENCE (peak amplitude ${peak:-0})"
+            say "        The capture path is connected, so this is upstream of Linux."
+            say "        On WSL: set the Windows default recording device to a physical"
+            say "        microphone. WSLg cannot capture from most virtual mixer outputs"
+            say "        (VoiceMeeter, VB-Cable, VAIO), which yields exactly this result."
+        fi
     else
         bad "sox capture: $(printf '%s' "$err" | tail -1)"
     fi
+    rm -f "$cap"
 else
     warn "sox not installed — Claude Code /voice requires it"
 fi
