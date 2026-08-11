@@ -775,6 +775,26 @@ def test_attribute_references_do_not_glue_to_the_previous_word(env, voicebox, tm
     assert "thinking is empty" in out
 
 
+def test_numeric_basenames_do_not_fuse_with_real_figures(env, voicebox, tmp_path):
+    """`/mnt/m/.Trashes/502` reduces to "502", which means nothing on its own
+    and landed against the measurement that followed — "502 246 GB", two
+    unrelated numbers heard as one quantity."""
+    transcript = transcript_of(
+        tmp_path,
+        [
+            _entry("user", text="go"),
+            _entry(
+                "assistant",
+                blocks=[text_block("`/mnt/m/.Trashes/502` = **246 GB** of trash on a 93% full drive.")],
+            ),
+        ],
+    )
+    out = preview(env, transcript)
+    assert "502" not in out
+    assert "246 GB of trash" in out
+    assert "93% full" in out, "a real figure was thrown out with the path"
+
+
 def test_narration_is_chunked_for_playback(env, voicebox, tmp_path):
     """One long utterance cannot be interrupted; chunks bound how much of a
     silenced narration still gets spoken."""

@@ -112,7 +112,9 @@ vb_scrub_tokens() {
             # Path -> basename. A directory written with a trailing slash has
             # no basename, and dropping it left sentences like "has no at all";
             # fall back to the last named segment instead.
+            was_path = 0
             if (t ~ /\//) {
+                was_path = 1
                 whole = t
                 sub(/^.*\//, "", t)
                 if (t == "") {
@@ -121,6 +123,12 @@ vb_scrub_tokens() {
                     t = whole
                 }
             }
+            # A basename that is only digits carries nothing on its own and
+            # lands next to whatever number follows. "/mnt/m/.Trashes/502 =
+            # 246 GB" was spoken as "502 246 GB" — two unrelated figures fused
+            # into one meaningless quantity. Bare numbers that were never part
+            # of a path are kept; those are the real measurements.
+            if (was_path && t ~ /^[0-9]+$/) continue
             # A leading dot is an attribute reference (.thinking, .message)
             # that has lost its backticks. Left alone it later gets glued to
             # the previous word, so "encrypted — .thinking is empty" is spoken
