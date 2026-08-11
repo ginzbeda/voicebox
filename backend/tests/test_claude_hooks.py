@@ -1,0 +1,629 @@
+"""Tests for the Claude Code hook scripts in scripts/claude/.
+
+These run the real shell scripts as subprocesses against a stub HTTP server and
+a fake audio player, so nothing here needs a sound card — which matters, because
+the machines that most need these hooks (containers, headless WSL) are exactly
+the ones that have no audio device to test against.
+
+The behaviours worth guarding are the ones that only show up when things go
+wrong: a stopped backend must cost a turn milliseconds rather than seconds, and
+a hook must never exit non-zero, because a failing Stop hook wedges the turn it
+was supposed to narrate.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import threading
+import time
+import wave
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SCRIPTS = REPO_ROOT / "scripts" / "claude"
+
+pytestmark = pytest.mark.skipif(
+    subprocess.run(["which", "jq"], capture_output=True).returncode != 0,
+    reason="hooks require jq",
+)
+
+
+# ─── Stub Voicebox ─────────────────────────────────────────────────────────
+
+
+class _Recorder:
+    def __init__(self) -> None:
+        self.speaks: list[dict] = []
+        self.headers: list[dict] = []
+        self.audio_fetches: list[str] = []
+        self.status_value = "completed"
+        self.speak_status = 200
+
+
+def _wav_bytes() -> bytes:
+    import io
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(24000)
+        w.writeframes(b"\x00\x00" * 2400)
+    return buf.getvalue()
+
+
+@pytest.fixture
+def voicebox():
+    """A stub of the endpoints the hooks touch: POST /speak, the status SSE,
+    and GET /audio/{id}."""
+    recorder = _Recorder()
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):  # silence
+            pass
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length) or b"{}")
+            recorder.headers.append(dict(self.headers))
+            if recorder.speak_status != 200:
+                payload = json.dumps({"detail": "stub error"}).encode()
+                self.send_response(recorder.speak_status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+            recorder.speaks.append(body)
+            payload = json.dumps({"id": "gen-1", "status": "generating"}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def do_GET(self):
+            if self.path.endswith("/status"):
+                # Bare `data:` frames with no `event:` line — the real shape.
+                frame = (
+                    f'data: {{"id": "gen-1", "status": "{recorder.status_value}", '
+                    f'"duration": 1.0, "error": null, "source": "rest"}}\n\n'
+                ).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                self.wfile.write(frame)
+                return
+            if self.path.startswith("/audio/"):
+                recorder.audio_fetches.append(self.path)
+                data = _wav_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "audio/x-wav")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            self.send_response(404)
+            self.end_headers()
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    recorder.url = f"http://127.0.0.1:{server.server_port}"
+    try:
+        yield recorder
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.fixture
+def fake_player(tmp_path: Path) -> Path:
+    """A `paplay` on PATH that records its argv instead of making noise."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    log = tmp_path / "played.log"
+    player = bindir / "paplay"
+    player.write_text(f'#!/bin/sh\necho "$@" >> "{log}"\nexit 0\n')
+    player.chmod(0o755)
+    return log
+
+
+@pytest.fixture
+def env(tmp_path: Path, voicebox, fake_player):
+    state = tmp_path / "state"
+    return {
+        **os.environ,
+        "PATH": f"{fake_player.parent / 'bin'}:{os.environ['PATH']}",
+        "VOICEBOX_URL": voicebox.url,
+        "VOICEBOX_STATE_DIR": str(state),
+    }
+
+
+def transcript_with(tmp_path: Path, text: str) -> Path:
+    """A minimal Claude Code transcript JSONL holding one assistant reply."""
+    path = tmp_path / "transcript.jsonl"
+    path.write_text(
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": text}]},
+            }
+        )
+        + "\n"
+    )
+    return path
+
+
+def run_stop_hook(env: dict, transcript: Path, timeout: int = 30):
+    return subprocess.run(
+        [str(SCRIPTS / "voicebox-speak.sh")],
+        input=json.dumps({"transcript_path": str(transcript)}),
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=timeout,
+    )
+
+
+# ─── Endpoint resolution ───────────────────────────────────────────────────
+#
+# Every other test pins VOICEBOX_URL, which is exactly how the default was
+# allowed to be wrong: the hooks shipped pointing at 17600, a port specific to
+# one machine's container, so a stock install tripped the circuit breaker on the
+# first turn and went quiet with no visible cause.
+
+
+def _resolved_base(extra_env: dict) -> str:
+    common = SCRIPTS / "voicebox-common.sh"
+    env = {k: v for k, v in os.environ.items() if not k.startswith("VOICEBOX_")}
+    return subprocess.run(
+        ["bash", "-c", f'. "{common}"; printf %s "$VB_BASE"'],
+        capture_output=True,
+        text=True,
+        env={**env, **extra_env},
+        timeout=30,
+    ).stdout.strip()
+
+
+def test_default_endpoint_is_the_project_default_port():
+    """17493 is the default in package.json, mcp_shim and the Rust SERVER_PORT.
+    A deployment-specific port here strands every stock install."""
+    assert _resolved_base({}) == "http://127.0.0.1:17493"
+
+
+def test_voicebox_port_is_honoured():
+    """install.sh and the README both tell users to set this."""
+    assert _resolved_base({"VOICEBOX_PORT": "17600"}) == "http://127.0.0.1:17600"
+
+
+def test_voicebox_host_is_honoured():
+    """Container clients reach the backend by service DNS, not loopback."""
+    assert _resolved_base({"VOICEBOX_HOST": "voicebox"}) == "http://voicebox:17493"
+
+
+def test_voicebox_url_overrides_host_and_port():
+    """Full-URL escape hatch for a path prefix or TLS."""
+    resolved = _resolved_base({"VOICEBOX_URL": "https://box.internal/vb", "VOICEBOX_PORT": "17600"})
+    assert resolved == "https://box.internal/vb"
+
+
+# ─── The happy path ────────────────────────────────────────────────────────
+
+
+def test_speaks_the_last_assistant_message(env, voicebox, tmp_path):
+    result = run_stop_hook(env, transcript_with(tmp_path, "The build is green."))
+    assert result.returncode == 0
+    assert len(voicebox.speaks) == 1
+    assert voicebox.speaks[0]["text"] == "The build is green."
+
+
+def test_sends_the_client_id_header(env, voicebox, tmp_path):
+    """Per-client voice bindings are keyed on this header."""
+    run_stop_hook(env, transcript_with(tmp_path, "hello"))
+    assert voicebox.headers[0]["X-Voicebox-Client-Id"] == "claude-code"
+
+
+def test_client_id_is_overridable_for_containers(env, voicebox, tmp_path):
+    run_stop_hook(
+        {**env, "VOICEBOX_CLIENT_ID": "claude-code-podman"},
+        transcript_with(tmp_path, "hello"),
+    )
+    assert voicebox.headers[0]["X-Voicebox-Client-Id"] == "claude-code-podman"
+
+
+def test_audio_is_fetched_and_played(env, voicebox, fake_player, tmp_path):
+    """The whole point: generation must end up at a player."""
+    run_stop_hook(env, transcript_with(tmp_path, "hello"))
+
+    deadline = time.time() + 20
+    while time.time() < deadline and not fake_player.exists():
+        time.sleep(0.2)
+
+    assert fake_player.exists(), "audio was never handed to a player"
+    assert voicebox.audio_fetches == ["/audio/gen-1"]
+    assert fake_player.read_text().strip().endswith(".wav")
+
+
+# ─── Text handling ─────────────────────────────────────────────────────────
+
+
+def test_code_blocks_are_dropped(env, voicebox, tmp_path):
+    """A fenced diff read aloud is unusable and can run for minutes."""
+    reply = "Here is the fix:\n```python\nimport os\nprint(os.getcwd())\n```\nDone."
+    run_stop_hook(env, transcript_with(tmp_path, reply))
+    spoken = voicebox.speaks[0]["text"]
+    assert "import os" not in spoken
+    assert "Here is the fix" in spoken
+    assert "Done." in spoken
+
+
+def test_multi_line_reply_is_spoken_in_full(env, voicebox, tmp_path):
+    """Regression: jq -r emits the reply with its own newlines intact, so a
+    `tail -1` meant to pick the last *message* instead picked the last *line* —
+    silently speaking only the final sentence of every multi-line answer."""
+    run_stop_hook(env, transcript_with(tmp_path, "First sentence.\nSecond sentence.\nThird."))
+    spoken = voicebox.speaks[0]["text"]
+    assert "First sentence." in spoken
+    assert "Second sentence." in spoken
+    assert "Third." in spoken
+
+
+def test_last_of_several_assistant_messages_wins(env, voicebox, tmp_path):
+    """A real transcript holds the whole session, not one reply."""
+    path = tmp_path / "transcript.jsonl"
+    path.write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            )
+            for text in ["Older reply.", "Middle reply.", "Newest reply."]
+        )
+        + "\n"
+    )
+    run_stop_hook(env, path)
+    assert voicebox.speaks[0]["text"] == "Newest reply."
+
+
+def test_markdown_and_urls_are_stripped(env, voicebox, tmp_path):
+    run_stop_hook(
+        env,
+        transcript_with(tmp_path, "See **bold** and https://example.com/x for `code`."),
+    )
+    spoken = voicebox.speaks[0]["text"]
+    assert "**" not in spoken
+    assert "`" not in spoken
+    assert "example.com" not in spoken
+
+
+def test_long_replies_are_capped(env, voicebox, tmp_path):
+    run_stop_hook({**env, "VOICEBOX_MAXCHARS": "20"}, transcript_with(tmp_path, "x" * 500))
+    assert len(voicebox.speaks[0]["text"]) == 20
+
+
+def test_code_only_reply_says_nothing(env, voicebox, tmp_path):
+    run_stop_hook(env, transcript_with(tmp_path, "```\nrm -rf /\n```"))
+    assert voicebox.speaks == []
+
+
+def test_repeated_text_is_spoken_once(env, voicebox, tmp_path):
+    """Stop can fire more than once per logical turn."""
+    transcript = transcript_with(tmp_path, "Same message.")
+    run_stop_hook(env, transcript)
+    run_stop_hook(env, transcript)
+    assert len(voicebox.speaks) == 1
+
+
+# ─── Failure modes ─────────────────────────────────────────────────────────
+
+
+def test_missing_transcript_is_silent_and_clean(env, voicebox, tmp_path):
+    result = run_stop_hook(env, tmp_path / "does-not-exist.jsonl")
+    assert result.returncode == 0
+    assert voicebox.speaks == []
+
+
+def test_malformed_payload_exits_zero(env):
+    result = subprocess.run(
+        [str(SCRIPTS / "voicebox-speak.sh")],
+        input="not json at all",
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+    assert result.returncode == 0
+
+
+def test_toggle_off_makes_no_request(env, voicebox, tmp_path):
+    state = Path(env["VOICEBOX_STATE_DIR"])
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "enabled").write_text("0")
+    run_stop_hook(env, transcript_with(tmp_path, "hello"))
+    assert voicebox.speaks == []
+
+
+def test_open_breaker_short_circuits_fast(env, voicebox, tmp_path):
+    """The reason the breaker exists. With Voicebox down, an unguarded hook
+    pays a connect timeout on every turn; this must cost near nothing."""
+    state = Path(env["VOICEBOX_STATE_DIR"])
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "down-until").write_text(str(int(time.time()) + 300))
+
+    started = time.time()
+    result = run_stop_hook(env, transcript_with(tmp_path, "hello"))
+    elapsed = time.time() - started
+
+    assert result.returncode == 0
+    assert voicebox.speaks == []
+    assert elapsed < 1.0, f"breaker did not short-circuit (took {elapsed:.2f}s)"
+
+
+def test_unreachable_backend_trips_the_breaker(env, tmp_path):
+    """First failure must arm the breaker so the next turns are free."""
+    dead = {**env, "VOICEBOX_URL": "http://127.0.0.1:9"}
+    result = run_stop_hook(dead, transcript_with(tmp_path, "hello"))
+    assert result.returncode == 0
+    assert (Path(env["VOICEBOX_STATE_DIR"]) / "down-until").exists()
+
+
+def test_expired_breaker_allows_requests_again(env, voicebox, tmp_path):
+    state = Path(env["VOICEBOX_STATE_DIR"])
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "down-until").write_text(str(int(time.time()) - 5))
+    run_stop_hook(env, transcript_with(tmp_path, "hello"))
+    assert len(voicebox.speaks) == 1
+
+
+def test_server_error_trips_the_breaker(env, voicebox, tmp_path):
+    """A 5xx is a dead backend: stop calling it. Judging health by 'did a body
+    come back' counted an error page as success and reset the breaker."""
+    voicebox.speak_status = 503
+    run_stop_hook(env, transcript_with(tmp_path, "hello"))
+    assert (Path(env["VOICEBOX_STATE_DIR"]) / "down-until").exists()
+
+
+def test_client_error_does_not_trip_the_breaker(env, voicebox, tmp_path):
+    """A 400 'No voice profile resolved' means the server is healthy and the
+    request was wrong. Marking it down would suppress speech for a minute after
+    every such reply."""
+    voicebox.speak_status = 400
+    run_stop_hook(env, transcript_with(tmp_path, "hello"))
+    assert not (Path(env["VOICEBOX_STATE_DIR"]) / "down-until").exists()
+
+
+def test_a_failed_speak_can_be_retried_later(env, voicebox, tmp_path):
+    """The de-dup marker used to be written before the speak was attempted, so a
+    reply that failed while the backend was down could never be spoken again."""
+    transcript = transcript_with(tmp_path, "The build is green.")
+    voicebox.speak_status = 503
+    run_stop_hook(env, transcript)
+    assert voicebox.speaks == []
+
+    voicebox.speak_status = 200
+    (Path(env["VOICEBOX_STATE_DIR"]) / "down-until").unlink(missing_ok=True)
+    run_stop_hook(env, transcript)
+    assert [s["text"] for s in voicebox.speaks] == ["The build is green."]
+
+
+def test_dedup_is_scoped_per_session(env, voicebox, tmp_path):
+    """Two concurrent sessions ending on the same short reply must both speak.
+    A single global marker silenced the second."""
+    first = tmp_path / "a.jsonl"
+    second = tmp_path / "b.jsonl"
+    for path in (first, second):
+        path.write_text(
+            json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "Done."}]}}) + "\n"
+        )
+
+    for path, session in ((first, "session-a"), (second, "session-b")):
+        subprocess.run(
+            [str(SCRIPTS / "voicebox-speak.sh")],
+            input=json.dumps({"transcript_path": str(path), "session_id": session}),
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=30,
+        )
+
+    assert len(voicebox.speaks) == 2, "second session was wrongly de-duplicated"
+
+
+def test_dedup_still_suppresses_within_one_session(env, voicebox, tmp_path):
+    transcript = transcript_with(tmp_path, "Same message.")
+    payload = json.dumps({"transcript_path": str(transcript), "session_id": "session-a"})
+    for _ in range(2):
+        subprocess.run(
+            [str(SCRIPTS / "voicebox-speak.sh")],
+            input=payload,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=30,
+        )
+    assert len(voicebox.speaks) == 1
+
+
+def test_failed_generation_is_not_played(env, voicebox, fake_player, tmp_path):
+    voicebox.status_value = "failed"
+    run_stop_hook(env, transcript_with(tmp_path, "hello"))
+    time.sleep(2)
+    assert voicebox.audio_fetches == []
+    assert not fake_player.exists()
+
+
+# ─── Notification hook ─────────────────────────────────────────────────────
+
+
+def run_notify(env: dict, message: str):
+    return subprocess.run(
+        [str(SCRIPTS / "voicebox-notify.sh")],
+        input=json.dumps({"message": message}),
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+
+
+def test_notification_is_spoken(env, voicebox):
+    result = run_notify(env, "Claude needs your permission to run npm test")
+    assert result.returncode == 0
+    assert "permission" in voicebox.speaks[0]["text"]
+
+
+def test_notification_uses_its_own_client_id(env, voicebox):
+    """A separate binding lets notifications use a shorter, distinct voice."""
+    run_notify(env, "waiting for input")
+    assert voicebox.headers[0]["X-Voicebox-Client-Id"] == "claude-code-notify"
+
+
+def test_notifications_are_rate_limited(env, voicebox):
+    """A burst of permission prompts must not queue a minute of speech."""
+    for i in range(4):
+        run_notify(env, f"prompt number {i}")
+    assert len(voicebox.speaks) == 1
+
+
+def test_empty_notification_says_nothing(env, voicebox):
+    result = run_notify(env, "")
+    assert result.returncode == 0
+    assert voicebox.speaks == []
+
+
+# ─── SubagentStop hook ─────────────────────────────────────────────────────
+
+
+def run_subagent(env: dict, payload: dict):
+    return subprocess.run(
+        [str(SCRIPTS / "voicebox-subagent.sh")],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+
+
+def test_subagent_hook_is_off_by_default(env, voicebox):
+    """Parallel agents would otherwise queue minutes of speech."""
+    result = run_subagent(env, {"subagent_type": "code-reviewer"})
+    assert result.returncode == 0
+    assert voicebox.speaks == []
+
+
+def test_subagent_hook_speaks_when_enabled(env, voicebox):
+    run_subagent({**env, "VOICEBOX_SPEAK_SUBAGENTS": "1"}, {"subagent_type": "code-reviewer"})
+    assert "code-reviewer" in voicebox.speaks[0]["text"]
+
+
+def test_subagent_hook_falls_back_to_a_generic_phrase(env, voicebox):
+    run_subagent({**env, "VOICEBOX_SPEAK_SUBAGENTS": "1"}, {})
+    assert voicebox.speaks[0]["text"] == "A subagent finished."
+
+
+def test_subagent_announcements_are_rate_limited(env, voicebox):
+    enabled = {**env, "VOICEBOX_SPEAK_SUBAGENTS": "1"}
+    for i in range(3):
+        run_subagent(enabled, {"subagent_type": f"agent-{i}"})
+    assert len(voicebox.speaks) == 1
+
+
+# ─── Playback script in isolation ──────────────────────────────────────────
+
+
+def test_play_script_does_not_release_a_lock_it_never_took(env, voicebox, tmp_path):
+    """The EXIT trap is installed before the lock is acquired. Releasing
+    unconditionally let an instance that bailed early — bad audio fetch, no
+    player — delete the lock held by an instance mid-sentence, so a third
+    talked over it."""
+    state = Path(env["VOICEBOX_STATE_DIR"])
+    state.mkdir(parents=True, exist_ok=True)
+    lock = state / "play.lock"
+    lock.mkdir()  # stand in for another instance currently speaking
+
+    # No player on PATH, so this instance bails before ever taking the lock.
+    empty = tmp_path / "noplayer"
+    empty.mkdir()
+    result = subprocess.run(
+        [str(SCRIPTS / "voicebox-play.sh"), "gen-1"],
+        capture_output=True,
+        text=True,
+        env={**env, "PATH": f"{empty}:/usr/bin:/bin", "VOICEBOX_LOCK_WAIT": "1"},
+        timeout=60,
+    )
+
+    assert result.returncode == 0
+    assert lock.exists(), "an instance that never held the lock deleted it"
+
+
+def test_play_script_skips_rather_than_overlapping_when_the_lock_is_held(env, voicebox, fake_player, tmp_path):
+    """Falling through to play anyway after the wait expired produced exactly
+    the overlapping speech the lock exists to prevent."""
+    state = Path(env["VOICEBOX_STATE_DIR"])
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "play.lock").mkdir()
+
+    result = subprocess.run(
+        [str(SCRIPTS / "voicebox-play.sh"), "gen-1"],
+        capture_output=True,
+        text=True,
+        env={**env, "VOICEBOX_LOCK_WAIT": "2", "VOICEBOX_LOCK_STALE_MIN": "60"},
+        timeout=60,
+    )
+
+    assert result.returncode == 0
+    assert "skipping" in result.stderr
+    assert not fake_player.exists(), "played while another utterance held the lock"
+
+
+def test_play_script_requires_an_id(env):
+    result = subprocess.run(
+        [str(SCRIPTS / "voicebox-play.sh")],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+    assert result.returncode == 2
+
+
+def test_play_script_removes_its_temp_file(env, voicebox, fake_player):
+    subprocess.run(
+        [str(SCRIPTS / "voicebox-play.sh"), "gen-1"],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=60,
+    )
+    assert fake_player.exists()
+    played = Path(fake_player.read_text().strip())
+    assert not played.exists(), "temp wav was left behind"
+
+
+def test_play_script_reports_a_player_that_cannot_open_the_device(env, voicebox, tmp_path):
+    """ffplay exits 0 even when it cannot open the audio device, so stderr has
+    to be treated as authoritative or a dead sink looks like success."""
+    bindir = tmp_path / "badbin"
+    bindir.mkdir()
+    bad = bindir / "paplay"
+    bad.write_text('#!/bin/sh\necho "ALSA: Couldn\'t open audio device" >&2\nexit 0\n')
+    bad.chmod(0o755)
+
+    result = subprocess.run(
+        [str(SCRIPTS / "voicebox-play.sh"), "gen-1"],
+        capture_output=True,
+        text=True,
+        env={**env, "PATH": f"{bindir}:{env['PATH']}"},
+        timeout=60,
+    )
+    assert result.returncode == 0
+    assert "failed" in result.stderr
