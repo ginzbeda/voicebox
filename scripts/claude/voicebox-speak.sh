@@ -29,6 +29,14 @@ payload=$(cat)
 transcript=$(printf '%s' "$payload" | jq -r '.transcript_path // empty' 2>/dev/null)
 [ -n "$transcript" ] && [ -f "$transcript" ] || exit 0
 
+# Scope repeat-suppression to the session. A single global marker means two
+# concurrent sessions ending a turn with the same short reply ("Done.") would
+# silence the second one. Fall back to the transcript path when no session id
+# is present, which is still per-session.
+session=$(printf '%s' "$payload" | jq -r '.session_id // empty' 2>/dev/null)
+[ -n "$session" ] || session="$transcript"
+session_key=$(printf '%s' "$session" | cksum | cut -d' ' -f1)
+
 # The transcript is JSONL, so jq reads it a document at a time and this stays
 # cheap on long sessions — no slurping a session-length file into memory.
 #
@@ -55,12 +63,17 @@ text=$(printf '%s' "$text" | cut -c1-"$MAXCHARS")
 # Stop can fire more than once for a single logical turn; speaking the same
 # paragraph twice is worse than staying quiet.
 vb_init_state
+marker="$VB_STATE/last-spoken-$session_key"
 hash=$(printf '%s' "$text" | cksum | cut -d' ' -f1)
-[ "$hash" = "$(cat "$VB_STATE/last-spoken" 2>/dev/null)" ] && exit 0
-printf '%s' "$hash" > "$VB_STATE/last-spoken" 2>/dev/null || true
+[ "$hash" = "$(cat "$marker" 2>/dev/null)" ] && exit 0
 
 gid=$(vb_speak "$text") || exit 0
 [ -n "$gid" ] || exit 0
+
+# Record only after the speak succeeded. Marking first meant a failed call —
+# backend down, no profile bound — permanently suppressed that text, so the
+# same reply could never be spoken once the backend came back.
+printf '%s' "$hash" > "$marker" 2>/dev/null || true
 
 # Detach: generation plus playback takes seconds, and the turn must not wait.
 setsid "$HERE/voicebox-play.sh" "$gid" >/dev/null 2>&1 < /dev/null &
