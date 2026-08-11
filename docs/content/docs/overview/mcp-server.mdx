@@ -30,8 +30,22 @@ coming out of your machine.
 ```
 claude mcp add voicebox \
   --transport http \
-  --url http://127.0.0.1:17493/mcp \
+  --url http://127.0.0.1:17493/mcp/ \
   --header "X-Voicebox-Client-Id: claude-code"
+```
+
+<Callout type="warn">
+  Keep the trailing slash on `/mcp/`. The Streamable HTTP mount is only routed at
+  `/mcp/`; a `POST` to `/mcp` returns **405 Method Not Allowed**, and clients report
+  it as an opaque connection failure.
+</Callout>
+
+If the backend is not on the default port — a container, a port-forward, or a
+second instance — set `VOICEBOX_PORT` (and `VOICEBOX_HOST` if it is not
+loopback) rather than editing the URL. The repo's `.mcp.json` reads both:
+
+```bash
+export VOICEBOX_PORT=17600   # e.g. Docker publishing container 17493 on host 17600
 ```
 
 ### Cursor / Windsurf / VS Code MCP / any HTTP MCP client
@@ -42,7 +56,7 @@ Drop this into the client's MCP config (usually `.mcp.json` or a Settings UI):
 {
   "mcpServers": {
     "voicebox": {
-      "url": "http://127.0.0.1:17493/mcp",
+      "url": "http://127.0.0.1:17493/mcp/",
       "headers": { "X-Voicebox-Client-Id": "cursor" }
     }
   }
@@ -236,7 +250,7 @@ Use the MCP Inspector to poke tools directly without plumbing through an
 agent:
 
 ```
-npx @modelcontextprotocol/inspector http://127.0.0.1:17493/mcp
+npx @modelcontextprotocol/inspector http://127.0.0.1:17493/mcp/
 ```
 
 Start with `voicebox.list_profiles` to confirm wiring, then
