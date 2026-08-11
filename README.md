@@ -381,9 +381,20 @@ and silently discarded. `scripts/claude/voicebox-play.sh` is what closes that ga
 
 ```bash
 just install-claude-integration --merge   # symlinks hooks, merges settings.json
-export VOICEBOX_PORT=17600                # only if not on the default 17493
 /say test                                 # should speak
 ```
+
+If the backend is not on the default `127.0.0.1:17493` — a container, a
+port-forward — set `VOICEBOX_PORT` (and `VOICEBOX_HOST` if it is not loopback)
+somewhere your shell exports them for every session, such as `~/.bashrc`:
+
+```bash
+export VOICEBOX_PORT=17600                # e.g. Docker publishing 17493 on 17600
+```
+
+A hook launched by Claude Code does not inherit a variable you exported in one
+terminal, so setting it ad hoc appears to do nothing. The hooks read the same
+two variables `.mcp.json` does, so one setting covers both.
 
 The installer symlinks into `~/.claude/`, which lives outside this repo, so the
 repo stays the source of truth and `git pull` updates the installed copy. It
@@ -420,7 +431,9 @@ All optional; the defaults suit a local desktop install.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `VOICEBOX_URL` | `http://127.0.0.1:17600` | Backend base URL for the hooks |
+| `VOICEBOX_HOST` | `127.0.0.1` | Backend host — same variable `.mcp.json` reads |
+| `VOICEBOX_PORT` | `17493` | Backend port — set this for a container or port-forward |
+| `VOICEBOX_URL` | derived from the two above | Full base URL; overrides both, for a path prefix or TLS |
 | `VOICEBOX_CLIENT_ID` | `claude-code` | Which per-client voice binding to use |
 | `VOICEBOX_MAXCHARS` | `400` | Cap on spoken length — Voicebox generates in real time, so an uncapped answer can produce minutes of audio |
 | `VOICEBOX_SPEAK_SUBAGENTS` | `0` | Announce subagent completions |
