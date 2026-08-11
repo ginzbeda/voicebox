@@ -12,6 +12,10 @@
 # not. Safe to run anywhere — it only reads, and the probes are silent and sub-second.
 set -uo pipefail
 
+# out_ok/in_ok are tri-state: 1 pass, 0 fail, -1 could not determine. "Could not
+# determine" must not be reported as failure — this script is what the README
+# points people at when they hear nothing, and a false "NO AUDIO OUTPUT" sends
+# them after a WSLg problem they do not have.
 pass=0 out_ok=0 in_ok=0
 
 say()  { printf '%s\n' "$*"; }
@@ -94,7 +98,11 @@ if command -v sox >/dev/null 2>&1 && sox -n "$probe" synth 0.15 sine 440 vol 0.0
     done
     [ "$out_ok" = 1 ] || bad "no working audio output"
 else
-    warn "sox unavailable — cannot build a probe tone, skipping playback test"
+    # Only sox can synthesise the probe tone, but sox is not required to *play*
+    # audio. Report unknown rather than failure so a machine with a working
+    # paplay and no sox is not told its audio is broken.
+    warn "sox unavailable — cannot build a probe tone, playback UNTESTED"
+    out_ok=-1
 fi
 
 say
@@ -125,11 +133,19 @@ if command -v sox >/dev/null 2>&1; then
     fi
     rm -f "$cap"
 else
-    warn "sox not installed — Claude Code /voice requires it"
+    warn "sox not installed — Claude Code /voice requires it, capture UNTESTED"
+    in_ok=-1
 fi
 
 say
 say "== verdict =="
+if [ "$out_ok" = -1 ] || [ "$in_ok" = -1 ]; then
+    say "  INCONCLUSIVE — install sox to test properly:  sudo apt install sox libsox-fmt-pulse"
+    say "  (on WSL, libsox-fmt-pulse is required as well: plain sox only ships the ALSA"
+    say "   backend, which cannot record when there is no /dev/snd device.)"
+    exit 3
+fi
+
 if [ "$out_ok" = 1 ] && [ "$in_ok" = 1 ]; then
     say "  Audio works both ways. Voicebox playback and Claude Code /voice should both function."
     exit 0
