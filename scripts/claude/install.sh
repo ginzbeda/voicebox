@@ -107,7 +107,12 @@ fi
 cat <<EOF
 
 Next:
-  export VOICEBOX_PORT=17600        # if the backend is not on the default 17493
+  # Only if the backend is not on the default 127.0.0.1:17493. The hooks read
+  # the same VOICEBOX_HOST / VOICEBOX_PORT that .mcp.json does, so set these
+  # where your shell will see them (~/.bashrc, ~/.zshenv) - a hook launched by
+  # Claude Code does not inherit a variable exported in one terminal.
+  export VOICEBOX_PORT=17600        # e.g. Docker publishing container 17493 on host 17600
+
   ~/.claude/hooks/voicectl.sh test  # end-to-end check
   ./scripts/check-wsl-audio.sh      # if you hear nothing
 EOF
