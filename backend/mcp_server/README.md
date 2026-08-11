@@ -15,7 +15,7 @@ Preferred — direct HTTP:
 {
   "mcpServers": {
     "voicebox": {
-      "url": "http://127.0.0.1:17493/mcp",
+      "url": "http://127.0.0.1:17493/mcp/",
       "headers": { "X-Voicebox-Client-Id": "claude-code" }
     }
   }
@@ -41,7 +41,7 @@ Claude Code one-liner:
 ```
 claude mcp add voicebox \
   --transport http \
-  --url http://127.0.0.1:17493/mcp \
+  --url http://127.0.0.1:17493/mcp/ \
   --header "X-Voicebox-Client-Id: claude-code"
 ```
 
@@ -66,7 +66,7 @@ Settings → MCP.
 ## Debug with MCP Inspector
 
 ```
-npx @modelcontextprotocol/inspector http://127.0.0.1:17493/mcp
+npx @modelcontextprotocol/inspector http://127.0.0.1:17493/mcp/
 ```
 
 Point it at the URL, hit "List tools," call `voicebox.list_profiles`
