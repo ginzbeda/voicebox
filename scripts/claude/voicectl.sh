@@ -51,10 +51,15 @@ api() {
 }
 
 stop_playback() {
-    # The play script is detached, so signal it rather than tracking a pid.
-    pkill -f "voicebox-play.sh" >/dev/null 2>&1 || true
-    for p in paplay pw-play aplay afplay ffplay play; do
-        pkill -x "$p" >/dev/null 2>&1 || true
+    # Kill the play scripts and, through the process group, the player each one
+    # spawned. Deliberately NOT `pkill -x ffplay` and friends: that matches every
+    # such process for the user, so stopping Claude's speech would also kill
+    # music in ffplay or a podcast in play. Only descendants of our own scripts
+    # are ours to kill.
+    for pid in $(pgrep -f "voicebox-play.sh" 2>/dev/null); do
+        # Negative pid targets the process group, taking the player with it.
+        kill -TERM -- "-$(ps -o pgid= "$pid" 2>/dev/null | tr -d ' ')" 2>/dev/null \
+            || kill -TERM "$pid" 2>/dev/null || true
     done
     rmdir "$VB_STATE/play.lock" 2>/dev/null || true
 }
@@ -70,6 +75,36 @@ speak_now() {
     setsid "$HERE/voicebox-play.sh" "$gid" >/dev/null 2>&1 < /dev/null &
     echo "Speaking as $VB_CLIENT_ID (generation $gid)"
 }
+
+# /say passes everything as one shell-quoted argument, so the text never gets
+# re-parsed by a shell. Split it here instead.
+if [ "$#" -eq 1 ]; then
+    # shellcheck disable=SC2086 # deliberate word split of the single argument
+    set -- $1
+fi
+
+# A subcommand only counts when it is used as one — `/say stop the build` is a
+# request to speak, not to stop playback. Bare `stop`/`on`/`off` take no
+# arguments, so anything following them means the user meant prose.
+case "${1:-}" in
+    on|off|status|stop|list|test|-h|--help|help)
+        [ "$#" -gt 1 ] && set -- "speak" "$@"
+        ;;
+    profile)
+        # `profile <name>` is the only subcommand that takes an argument.
+        [ "$#" -gt 2 ] && set -- "speak" "$@"
+        ;;
+esac
+# The synthetic "speak" marker means "everything after this is text".
+if [ "${1:-}" = "speak" ]; then
+    shift
+    text=$(printf '%s\n' "$*" | vb_clean_text)
+    vb_init_state
+    require_jq
+    [ -n "${text//[[:space:]]/}" ] || { usage; exit 2; }
+    speak_now "$text" || exit 1
+    exit 0
+fi
 
 cmd=${1:-status}
 shift || true

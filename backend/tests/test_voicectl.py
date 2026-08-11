@@ -299,3 +299,74 @@ def test_help_is_available(env):
     result = run(env, "--help")
     assert result.returncode == 0
     assert "profile <name>" in result.stdout
+
+
+# ─── Argument handling ─────────────────────────────────────────────────────
+#
+# /say hands the whole argument string over as ONE shell-quoted argument, so
+# arbitrary prose is never re-parsed by a shell. That means voicectl has to do
+# the splitting, and has to tell a subcommand apart from prose that merely
+# starts with the same word.
+
+
+def test_single_combined_argument_is_split(env, voicebox):
+    """The form /say actually uses."""
+    result = run(env, "profile Morgan")
+    assert result.returncode == 0
+    assert voicebox.puts[0]["profile_id"] == "id-morgan"
+
+
+@pytest.mark.parametrize(
+    "prose",
+    [
+        "stop the build and tell me why",
+        "on second thought, revert it",
+        "list of failing tests",
+        "test the retry path",
+        "status of the deploy",
+    ],
+)
+def test_prose_beginning_with_a_subcommand_word_is_spoken(env, voicebox, prose):
+    """`/say stop the build` is a request to speak, not to stop playback.
+    Every one of these is ordinary phrasing a user would hit by accident."""
+    result = run(env, prose)
+    assert result.returncode == 0
+    assert voicebox.speaks[0]["text"] == prose
+
+
+def test_bare_subcommand_still_acts_as_a_subcommand(env, voicebox):
+    assert run(env, "off").returncode == 0
+    assert voicebox.speaks == []
+
+
+def test_text_with_shell_metacharacters_is_spoken_literally(env, voicebox):
+    """The reason /say passes one quoted argument: this text used to reach a
+    shell, where it was a syntax error at best and command execution at worst."""
+    hostile = "don't stop; echo $(whoami) `id` && rm -rf /tmp/nope"
+    result = run(env, hostile)
+    assert result.returncode == 0
+    spoken = voicebox.speaks[0]["text"]
+    # Backticks are stripped as markdown, but nothing was evaluated.
+    assert "don't stop" in spoken
+    assert "whoami" in spoken
+    assert "rm -rf /tmp/nope" in spoken
+
+
+def test_stop_does_not_kill_unrelated_audio_players(env, tmp_path):
+    """`pkill -x ffplay` matched every such process for the user, so /say stop
+    also killed music playing in another window."""
+    import signal
+    import time
+
+    bystander = subprocess.Popen(
+        ["sleep", "30"],
+        start_new_session=True,
+    )
+    # Rename-by-symlink so it looks like a player without being one of ours.
+    try:
+        run(env, "stop")
+        time.sleep(0.5)
+        assert bystander.poll() is None, "an unrelated process was killed"
+    finally:
+        bystander.send_signal(signal.SIGKILL)
+        bystander.wait(timeout=5)
