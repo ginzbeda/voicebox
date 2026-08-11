@@ -45,6 +45,12 @@ const ENGLISH_ONLY_ENGINES = new Set(['luxtts', 'chatterbox_turbo']);
 /** Engines that support cloned (reference audio) profiles. */
 const CLONING_ENGINES = new Set(['qwen', 'luxtts', 'chatterbox', 'chatterbox_turbo', 'tada']);
 
+/** Display names for the two engines that ship preset voices. */
+const PRESET_ENGINE_LABELS: Record<string, string> = {
+  kokoro: 'Kokoro',
+  qwen_custom_voice: 'Qwen CustomVoice',
+};
+
 function getAvailableOptions(selectedProfile?: VoiceProfileResponse | null) {
   if (!selectedProfile) return ENGINE_OPTIONS;
   return ENGINE_OPTIONS.filter((opt) => isProfileCompatibleWithEngine(selectedProfile, opt.engine));
@@ -127,27 +133,57 @@ export function EngineModelSelector({ form, compact, selectedProfile }: EngineMo
     }
   }, [availableOptions, currentEngineAvailable, form]);
 
+  const restrictionHint = getEngineRestrictionHint(selectedProfile);
+
   const itemClass = compact ? 'text-xs text-muted-foreground' : undefined;
   const triggerClass = compact
     ? 'h-8 text-xs bg-card border-border rounded-full hover:bg-background/50 transition-all'
     : undefined;
 
   return (
-    <Select value={selectValue} onValueChange={(v) => applyEngineSelection(form, v)}>
-      <FormControl>
-        <SelectTrigger className={triggerClass}>
-          <SelectValue />
-        </SelectTrigger>
-      </FormControl>
-      <SelectContent>
-        {availableOptions.map((opt) => (
-          <SelectItem key={opt.value} value={opt.value} className={itemClass}>
-            {opt.label}
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
+    <div className="flex flex-col gap-1">
+      <Select value={selectValue} onValueChange={(v) => applyEngineSelection(form, v)}>
+        <FormControl>
+          <SelectTrigger className={triggerClass}>
+            <SelectValue />
+          </SelectTrigger>
+        </FormControl>
+        <SelectContent>
+          {availableOptions.map((opt) => (
+            <SelectItem key={opt.value} value={opt.value} className={itemClass}>
+              {opt.label}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      {/*
+        Without this the list silently collapses to a single entry and looks like
+        the other engines failed to install. A preset voice is produced by one
+        specific engine — "Vivian" is a Qwen CustomVoice speaker and Chatterbox
+        has no idea what she sounds like — so the constraint is real, but the
+        user has no way to infer it from an unexplained one-item dropdown.
+      */}
+      {restrictionHint && <p className="text-xs text-muted-foreground">{restrictionHint}</p>}
+    </div>
   );
+}
+
+/**
+ * Explain why the engine list is restricted, or return null when it isn't.
+ *
+ * Exported so the profile screens can reuse the same wording — the constraint
+ * shows up in more than one place and divergent phrasing reads like two
+ * different rules.
+ */
+export function getEngineRestrictionHint(
+  profile?: VoiceProfileResponse | null,
+): string | null {
+  if (!profile) return null;
+  if ((profile.voice_type || 'cloned') !== 'preset') return null;
+
+  const engine = profile.preset_engine ?? '';
+  const engineLabel = PRESET_ENGINE_LABELS[engine] ?? (engine || 'its own engine');
+  return `Preset voices only work with the engine that produced them, so ${profile.name} is locked to ${engineLabel}. Clone a voice from your own audio to use the other engines.`;
 }
 
 /** Returns a human-readable description for the currently selected engine. */

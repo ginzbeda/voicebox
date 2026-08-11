@@ -900,11 +900,36 @@ export function ProfileForm() {
                                 <SelectItem value="qwen_custom_voice">Qwen CustomVoice</SelectItem>
                               </SelectContent>
                             </Select>
+                            {/*
+                              Only these two engines ship a voice library; the other
+                              five clone from reference audio and have nothing to
+                              list. Without saying so, a user with Chatterbox and
+                              LuxTTS installed reads this two-item list as those
+                              engines having failed to install.
+                            */}
+                            <p className="text-xs text-muted-foreground">
+                              Only Kokoro and Qwen CustomVoice ship built-in voices.
+                              The other engines clone from your own audio — use
+                              &ldquo;Clone a voice&rdquo; to reach them.
+                            </p>
                           </FormItem>
 
                           {/* Voice picker */}
                           <FormItem>
                             <FormLabel>{t('profileForm.fields.voice')}</FormLabel>
+                            {/*
+                              An empty list here means the backend returned no
+                              voices — unreachable, or an engine whose presets
+                              could not be read. Rendering an empty grid gives no
+                              hint that anything went wrong.
+                            */}
+                            {presetVoices.length === 0 && (
+                              <p className="text-sm text-muted-foreground py-4">
+                                No built-in voices came back for this engine. Check
+                                that Voicebox is running and the engine&rsquo;s model
+                                is downloaded in Settings &rarr; Models.
+                              </p>
+                            )}
                             <div className="grid grid-cols-2 gap-1.5 max-h-[340px] overflow-y-auto pr-1">
                               {presetVoices.map((voice: PresetVoice) => (
                                 <button
