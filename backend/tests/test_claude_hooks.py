@@ -14,6 +14,7 @@ was supposed to narrate.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import threading
 import time
@@ -41,6 +42,7 @@ class _Recorder:
         self.headers: list[dict] = []
         self.audio_fetches: list[str] = []
         self.status_value = "completed"
+        self.speak_status = 200
 
 
 def _wav_bytes() -> bytes:
@@ -68,8 +70,16 @@ def voicebox():
         def do_POST(self):
             length = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(length) or b"{}")
-            recorder.speaks.append(body)
             recorder.headers.append(dict(self.headers))
+            if recorder.speak_status != 200:
+                payload = json.dumps({"detail": "stub error"}).encode()
+                self.send_response(recorder.speak_status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+            recorder.speaks.append(body)
             payload = json.dumps({"id": "gen-1", "status": "generating"}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -125,9 +135,7 @@ def fake_player(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def env(tmp_path: Path, voicebox, fake_player, monkeypatch):
-    import os
-
+def env(tmp_path: Path, voicebox, fake_player):
     state = tmp_path / "state"
     return {
         **os.environ,
@@ -161,6 +169,48 @@ def run_stop_hook(env: dict, transcript: Path, timeout: int = 30):
         env=env,
         timeout=timeout,
     )
+
+
+# ─── Endpoint resolution ───────────────────────────────────────────────────
+#
+# Every other test pins VOICEBOX_URL, which is exactly how the default was
+# allowed to be wrong: the hooks shipped pointing at 17600, a port specific to
+# one machine's container, so a stock install tripped the circuit breaker on the
+# first turn and went quiet with no visible cause.
+
+
+def _resolved_base(extra_env: dict) -> str:
+    common = SCRIPTS / "voicebox-common.sh"
+    env = {k: v for k, v in os.environ.items() if not k.startswith("VOICEBOX_")}
+    return subprocess.run(
+        ["bash", "-c", f'. "{common}"; printf %s "$VB_BASE"'],
+        capture_output=True,
+        text=True,
+        env={**env, **extra_env},
+        timeout=30,
+    ).stdout.strip()
+
+
+def test_default_endpoint_is_the_project_default_port():
+    """17493 is the default in package.json, mcp_shim and the Rust SERVER_PORT.
+    A deployment-specific port here strands every stock install."""
+    assert _resolved_base({}) == "http://127.0.0.1:17493"
+
+
+def test_voicebox_port_is_honoured():
+    """install.sh and the README both tell users to set this."""
+    assert _resolved_base({"VOICEBOX_PORT": "17600"}) == "http://127.0.0.1:17600"
+
+
+def test_voicebox_host_is_honoured():
+    """Container clients reach the backend by service DNS, not loopback."""
+    assert _resolved_base({"VOICEBOX_HOST": "voicebox"}) == "http://voicebox:17493"
+
+
+def test_voicebox_url_overrides_host_and_port():
+    """Full-URL escape hatch for a path prefix or TLS."""
+    resolved = _resolved_base({"VOICEBOX_URL": "https://box.internal/vb", "VOICEBOX_PORT": "17600"})
+    assert resolved == "https://box.internal/vb"
 
 
 # ─── The happy path ────────────────────────────────────────────────────────
@@ -333,6 +383,75 @@ def test_expired_breaker_allows_requests_again(env, voicebox, tmp_path):
     assert len(voicebox.speaks) == 1
 
 
+def test_server_error_trips_the_breaker(env, voicebox, tmp_path):
+    """A 5xx is a dead backend: stop calling it. Judging health by 'did a body
+    come back' counted an error page as success and reset the breaker."""
+    voicebox.speak_status = 503
+    run_stop_hook(env, transcript_with(tmp_path, "hello"))
+    assert (Path(env["VOICEBOX_STATE_DIR"]) / "down-until").exists()
+
+
+def test_client_error_does_not_trip_the_breaker(env, voicebox, tmp_path):
+    """A 400 'No voice profile resolved' means the server is healthy and the
+    request was wrong. Marking it down would suppress speech for a minute after
+    every such reply."""
+    voicebox.speak_status = 400
+    run_stop_hook(env, transcript_with(tmp_path, "hello"))
+    assert not (Path(env["VOICEBOX_STATE_DIR"]) / "down-until").exists()
+
+
+def test_a_failed_speak_can_be_retried_later(env, voicebox, tmp_path):
+    """The de-dup marker used to be written before the speak was attempted, so a
+    reply that failed while the backend was down could never be spoken again."""
+    transcript = transcript_with(tmp_path, "The build is green.")
+    voicebox.speak_status = 503
+    run_stop_hook(env, transcript)
+    assert voicebox.speaks == []
+
+    voicebox.speak_status = 200
+    (Path(env["VOICEBOX_STATE_DIR"]) / "down-until").unlink(missing_ok=True)
+    run_stop_hook(env, transcript)
+    assert [s["text"] for s in voicebox.speaks] == ["The build is green."]
+
+
+def test_dedup_is_scoped_per_session(env, voicebox, tmp_path):
+    """Two concurrent sessions ending on the same short reply must both speak.
+    A single global marker silenced the second."""
+    first = tmp_path / "a.jsonl"
+    second = tmp_path / "b.jsonl"
+    for path in (first, second):
+        path.write_text(
+            json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "Done."}]}}) + "\n"
+        )
+
+    for path, session in ((first, "session-a"), (second, "session-b")):
+        subprocess.run(
+            [str(SCRIPTS / "voicebox-speak.sh")],
+            input=json.dumps({"transcript_path": str(path), "session_id": session}),
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=30,
+        )
+
+    assert len(voicebox.speaks) == 2, "second session was wrongly de-duplicated"
+
+
+def test_dedup_still_suppresses_within_one_session(env, voicebox, tmp_path):
+    transcript = transcript_with(tmp_path, "Same message.")
+    payload = json.dumps({"transcript_path": str(transcript), "session_id": "session-a"})
+    for _ in range(2):
+        subprocess.run(
+            [str(SCRIPTS / "voicebox-speak.sh")],
+            input=payload,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=30,
+        )
+    assert len(voicebox.speaks) == 1
+
+
 def test_failed_generation_is_not_played(env, voicebox, fake_player, tmp_path):
     voicebox.status_value = "failed"
     run_stop_hook(env, transcript_with(tmp_path, "hello"))
@@ -419,6 +538,51 @@ def test_subagent_announcements_are_rate_limited(env, voicebox):
 
 
 # ─── Playback script in isolation ──────────────────────────────────────────
+
+
+def test_play_script_does_not_release_a_lock_it_never_took(env, voicebox, tmp_path):
+    """The EXIT trap is installed before the lock is acquired. Releasing
+    unconditionally let an instance that bailed early — bad audio fetch, no
+    player — delete the lock held by an instance mid-sentence, so a third
+    talked over it."""
+    state = Path(env["VOICEBOX_STATE_DIR"])
+    state.mkdir(parents=True, exist_ok=True)
+    lock = state / "play.lock"
+    lock.mkdir()  # stand in for another instance currently speaking
+
+    # No player on PATH, so this instance bails before ever taking the lock.
+    empty = tmp_path / "noplayer"
+    empty.mkdir()
+    result = subprocess.run(
+        [str(SCRIPTS / "voicebox-play.sh"), "gen-1"],
+        capture_output=True,
+        text=True,
+        env={**env, "PATH": f"{empty}:/usr/bin:/bin", "VOICEBOX_LOCK_WAIT": "1"},
+        timeout=60,
+    )
+
+    assert result.returncode == 0
+    assert lock.exists(), "an instance that never held the lock deleted it"
+
+
+def test_play_script_skips_rather_than_overlapping_when_the_lock_is_held(env, voicebox, fake_player, tmp_path):
+    """Falling through to play anyway after the wait expired produced exactly
+    the overlapping speech the lock exists to prevent."""
+    state = Path(env["VOICEBOX_STATE_DIR"])
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "play.lock").mkdir()
+
+    result = subprocess.run(
+        [str(SCRIPTS / "voicebox-play.sh"), "gen-1"],
+        capture_output=True,
+        text=True,
+        env={**env, "VOICEBOX_LOCK_WAIT": "2", "VOICEBOX_LOCK_STALE_MIN": "60"},
+        timeout=60,
+    )
+
+    assert result.returncode == 0
+    assert "skipping" in result.stderr
+    assert not fake_player.exists(), "played while another utterance held the lock"
 
 
 def test_play_script_requires_an_id(env):

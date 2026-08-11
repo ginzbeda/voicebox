@@ -71,7 +71,16 @@ fi
 # ─── Fetch and play ────────────────────────────────────────────────────────
 
 tmp=$(mktemp -t "voicebox-$GID-XXXXXX.wav") || exit 0
-cleanup() { rm -f "$tmp"; rmdir "$LOCK" 2>/dev/null || true; }
+# Only release a lock this process actually took. The trap is installed long
+# before the lock is acquired, so an unconditional rmdir here would let an
+# instance that bailed early — non-200 audio fetch, no player — delete the lock
+# held by an instance currently speaking, letting a third talk over it.
+have_lock=0
+cleanup() {
+    rm -f "$tmp"
+    [ "$have_lock" = 1 ] && rmdir "$LOCK" 2>/dev/null
+    return 0
+}
 trap cleanup EXIT
 
 # Note: /audio/{id} allows GET only — a HEAD probe returns 405.
@@ -87,14 +96,31 @@ player=$(vb_player_cmd) || {
 # Serialise playback. Two hooks firing close together would otherwise talk over
 # each other, which is worse than being a second late. mkdir is the atomic
 # primitive that exists everywhere, unlike flock.
+#
+# The stale-lock reaper deliberately uses a window longer than any single
+# utterance can be: reaping on a shorter timer would steal the lock from a long
+# reply that is still being spoken, producing the overlap this exists to stop.
+STALE_MIN="${VOICEBOX_LOCK_STALE_MIN:-10}"
 for _ in $(seq 1 "${VOICEBOX_LOCK_WAIT:-120}"); do
-    mkdir "$LOCK" 2>/dev/null && break
-    # A lock left by a killed player would block every future utterance.
-    if [ -n "$(find "$LOCK" -maxdepth 0 -mmin +5 2>/dev/null)" ]; then
+    if mkdir "$LOCK" 2>/dev/null; then
+        have_lock=1
+        break
+    fi
+    # A lock left behind by a killed player would otherwise block every future
+    # utterance forever.
+    if [ -n "$(find "$LOCK" -maxdepth 0 -mmin +"$STALE_MIN" 2>/dev/null)" ]; then
         rmdir "$LOCK" 2>/dev/null || true
     fi
     sleep 1
 done
+
+# Losing the race is not a reason to play anyway — that is precisely the
+# overlapping speech the lock exists to prevent. Drop this utterance instead;
+# by the time a queue has backed up this far the text is stale anyway.
+if [ "$have_lock" != 1 ]; then
+    echo "voicebox-play: another utterance still playing after ${VOICEBOX_LOCK_WAIT:-120}s; skipping $GID" >&2
+    exit 0
+fi
 
 # shellcheck disable=SC2086 # player is an intentional argv template
 err=$($player "$tmp" 2>&1)
