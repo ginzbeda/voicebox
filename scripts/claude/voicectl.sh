@@ -28,6 +28,8 @@ usage: /say <subcommand>
   stop            silence what is playing, leave speaking enabled
   list            available voice profiles
   profile <name>  bind this client to a voice
+  verbosity [lvl] how much of a turn to narrate: full, turn, or final
+  preview [file]  print what the last turn would say, without speaking
   test            end-to-end check
   <text>          speak this text now
 EOF
@@ -51,12 +53,22 @@ api() {
 }
 
 stop_playback() {
+    # Bump first. A narration is a queue of chunks, and most of them have no
+    # process to signal yet — they have not been generated. The epoch is what
+    # stops those; killing processes only handles the one already in flight.
+    vb_epoch_bump
+
     # Kill the play scripts and, through the process group, the player each one
     # spawned. Deliberately NOT `pkill -x ffplay` and friends: that matches every
     # such process for the user, so stopping Claude's speech would also kill
     # music in ffplay or a podcast in play. Only descendants of our own scripts
     # are ours to kill.
-    for pid in $(pgrep -f "voicebox-play.sh" 2>/dev/null); do
+    #
+    # The narrator belongs in this list too: it is the loop that requests the
+    # next chunk, so killing only the player left it free to immediately start
+    # generating the next utterance — `stop` would fall quiet for a second and
+    # then carry on talking.
+    for pid in $(pgrep -f "voicebox-narrate\.sh|voicebox-play\.sh" 2>/dev/null); do
         # Negative pid targets the process group, taking the player with it.
         kill -TERM -- "-$(ps -o pgid= "$pid" 2>/dev/null | tr -d ' ')" 2>/dev/null \
             || kill -TERM "$pid" 2>/dev/null || true
@@ -90,8 +102,9 @@ case "${1:-}" in
     on|off|status|stop|list|test|-h|--help|help)
         [ "$#" -gt 1 ] && set -- "speak" "$@"
         ;;
-    profile)
-        # `profile <name>` is the only subcommand that takes an argument.
+    profile|verbosity|preview)
+        # These take at most one argument. Anything longer is prose — `/say
+        # preview the results to the team` is a request to speak.
         [ "$#" -gt 2 ] && set -- "speak" "$@"
         ;;
 esac
@@ -134,6 +147,7 @@ case "$cmd" in
 
   status)
     if vb_enabled; then echo "speaking:  on"; else echo "speaking:  off"; fi
+    echo "narration: $(vb_verbosity)"
     if vb_breaker_open; then
         echo "backend:   marked down until $(cat "$VB_STATE/down-until" 2>/dev/null)"
     fi
@@ -174,6 +188,44 @@ case "$cmd" in
     [ -n "$profiles" ] || { echo "Voicebox is not reachable at $VB_BASE"; exit 1; }
     printf '%s' "$profiles" | jq -r '.[] | "\(.name)\t\(.voice_type)\t\(.default_engine // "-")"' \
         | column -t -s $'\t' 2>/dev/null || printf '%s' "$profiles" | jq -r '.[].name'
+    ;;
+
+  verbosity)
+    want="${1:-}"
+    if [ -z "$want" ]; then
+        echo "verbosity: $(vb_verbosity)"
+        echo
+        echo "  full   everything said and done, in order (default)"
+        echo "  turn   what was said, plus a sentence accounting for the work"
+        echo "  final  the closing message only"
+        exit 0
+    fi
+    case "$want" in
+        full|turn|final)
+            printf '%s' "$want" > "$VB_STATE/verbosity"
+            echo "Narration set to '$want'."
+            ;;
+        *)
+            echo "Unknown level '$want'. Use full, turn, or final."
+            exit 2
+            ;;
+    esac
+    ;;
+
+  preview)
+    # Tuning the phrasing against real transcripts is the whole development
+    # loop, and doing it through audio costs a GPU-minute per iteration.
+    transcript="${1:-}"
+    if [ -z "$transcript" ]; then
+        transcript=$(ls -t "$HOME"/.claude/projects/*/*.jsonl 2>/dev/null | head -1)
+    fi
+    [ -n "$transcript" ] && [ -f "$transcript" ] || {
+        echo "No transcript found. Pass one: /say preview <path-to-jsonl>"
+        exit 1
+    }
+    echo "# $(basename "$transcript") — verbosity $(vb_verbosity)"
+    printf '{"transcript_path":"%s","session_id":"preview"}' "$transcript" \
+        | VOICEBOX_DRY_RUN=1 "$HERE/voicebox-speak.sh"
     ;;
 
   profile)

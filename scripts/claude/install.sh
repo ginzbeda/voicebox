@@ -29,7 +29,20 @@ for arg in "$@"; do
     esac
 done
 
-HOOK_SCRIPTS=(voicebox-common.sh voicebox-play.sh voicebox-speak.sh voicebox-notify.sh voicebox-subagent.sh voicectl.sh)
+# The .jq programs are linked alongside the scripts, not left in the repo: the
+# hooks resolve them relative to their own location, and for an installed hook
+# that location is ~/.claude/hooks, not the checkout.
+HOOK_SCRIPTS=(
+    voicebox-common.sh
+    voicebox-play.sh
+    voicebox-speak.sh
+    voicebox-narrate.sh
+    voicebox-notify.sh
+    voicebox-subagent.sh
+    voicectl.sh
+    vb-narrate.jq
+    vb-render.jq
+)
 
 if [ "$UNINSTALL" = 1 ]; then
     for name in "${HOOK_SCRIPTS[@]}"; do
@@ -115,4 +128,21 @@ Next:
 
   ~/.claude/hooks/voicectl.sh test  # end-to-end check
   ./scripts/check-wsl-audio.sh      # if you hear nothing
+
+Narration:
+  Each finished turn is spoken in full by default - what the session said, and
+  the files, commands and searches it worked through. That is a lot of talking,
+  and it names files and describes commands out loud, which is fine at a desk
+  and less so in an open office or on a call.
+
+  ~/.claude/hooks/voicectl.sh preview          # what the last turn would say
+  ~/.claude/hooks/voicectl.sh verbosity turn   # said, plus a summary of the work
+  ~/.claude/hooks/voicectl.sh verbosity final  # closing message only
+  ~/.claude/hooks/voicectl.sh stop             # silence a narration in progress
+
+  Env overrides, if you would rather pin them in settings.json:
+    VOICEBOX_VERBOSITY=full|turn|final
+    VOICEBOX_TURN_MAXCHARS=2000   # total budget per turn, roughly 2 minutes
+    VOICEBOX_CHUNK_CHARS=350      # utterance length; also the interrupt grain
+    VOICEBOX_MAX_CHUNKS=8         # hard stop on utterances per turn
 EOF

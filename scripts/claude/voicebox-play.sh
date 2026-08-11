@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # Play a Voicebox generation on this machine's speakers.
 #
-#   voicebox-play.sh <generation-id>
+#   voicebox-play.sh <generation-id> [epoch]
+#
+# The optional epoch is the flush generation this utterance was queued under. It
+# is re-checked after the lock is acquired: an utterance that waited behind
+# others must not play into a world the user has since silenced.
 #
 # Voicebox generates audio server-side but never plays it — playback belongs to
 # whoever asked. The desktop app does this in Rust (tauri speak_monitor.rs); for
@@ -17,7 +21,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/voicebox-common.sh"
 
 GID="${1:-}"
-[ -n "$GID" ] || { echo "usage: voicebox-play.sh <generation-id>" >&2; exit 2; }
+EPOCH="${2:-}"
+[ -n "$GID" ] || { echo "usage: voicebox-play.sh <generation-id> [epoch]" >&2; exit 2; }
 
 POLL_TIMEOUT="${VOICEBOX_POLL_TIMEOUT:-180}"
 LOCK="$VB_STATE/play.lock"
@@ -119,6 +124,13 @@ done
 # by the time a queue has backed up this far the text is stale anyway.
 if [ "$have_lock" != 1 ]; then
     echo "voicebox-play: another utterance still playing after ${VOICEBOX_LOCK_WAIT:-120}s; skipping $GID" >&2
+    exit 0
+fi
+
+# Waiting on the lock can take a while, and `/say stop` during that wait is a
+# request for silence *now*. Checking only before the wait would let the backlog
+# resume speaking the moment the current utterance ended.
+if [ -n "$EPOCH" ] && [ "$(vb_epoch)" != "$EPOCH" ]; then
     exit 0
 fi
 

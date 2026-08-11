@@ -38,9 +38,21 @@ def register_tools(mcp: FastMCP) -> None:
     @mcp.tool(
         name="voicebox.speak",
         description=(
-            "Speak text in a Voicebox voice profile. Returns a generation id "
-            "the caller can poll at /generate/{id}/status. Audio plays on the "
-            "user's speakers and is saved to the Captures / History tab."
+            "Say something out loud to the user in a Voicebox voice profile. "
+            "Audio plays on their speakers, so this reaches them even when "
+            "they are not looking at the screen.\n"
+            "\n"
+            "Use it to narrate work in progress, not only to announce the end "
+            "of it: what you are about to try and why, what you found that "
+            "changed your mind, what just failed, what you concluded. A "
+            "sentence or two of plain spoken English per call.\n"
+            "\n"
+            "Never pass code, file contents, commands, stack traces, URLs or "
+            "long paths — they are unlistenable, and the user cannot skip "
+            "back. Refer to a file by its basename.\n"
+            "\n"
+            "Returns a generation id the caller can poll at "
+            "/generate/{id}/status. Saved to the Captures / History tab."
         ),
     )
     async def voicebox_speak(

@@ -1,6 +1,6 @@
 ---
-description: Control Voicebox speech output — on/off/status/stop/list/test, pick a voice, or speak text aloud
-argument-hint: "on | off | status | stop | list | test | profile <name> | <text to speak>"
+description: Control Voicebox speech output — on/off/status/stop/list/test, set narration detail, pick a voice, or speak text aloud
+argument-hint: "on | off | status | stop | list | test | verbosity <level> | preview | profile <name> | <text to speak>"
 allowed-tools: Bash(~/.claude/hooks/voicectl.sh:*)
 ---
 
@@ -24,3 +24,12 @@ Rules for invoking it:
 - Do not substitute your own `curl` calls, and do not summarise away any error
   text. If the backend is unreachable or no audio player is installed, that
   message is the actionable part.
+
+How much gets narrated is `verbosity`:
+
+- `full` (default) — everything said and done this turn, in order.
+- `turn` — what was said, plus one sentence accounting for the tool work.
+- `final` — the closing message only, which is what shipped before narration.
+
+`/say preview` prints what the most recent turn would say without speaking it,
+which is the way to judge a level before living with it.
