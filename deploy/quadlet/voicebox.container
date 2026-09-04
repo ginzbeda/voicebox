@@ -20,12 +20,35 @@ AddDevice=nvidia.com/gpu=all
 # profile database, captures, generated audio, and ~24 GB of downloaded models. The
 # names keep the old podman-compose prefix ON PURPOSE: renaming orphans all of that.
 Volume=podman-hosting_voicebox-data:/app/data
-Volume=podman-hosting_huggingface-cache:/home/voicebox/.cache/huggingface
+# Mounted under /app, NOT /home/voicebox/.cache/huggingface. The image ships
+# /home/voicebox as `drwx------ root:root`, so uid 999 cannot traverse its own home
+# and everything beneath it — including the model cache — is unreadable. The app
+# then dies at import in hf_offline_patch.ensure_original_qwen_config_cached() with
+# "Permission denied", which reads like a corrupt cache but is a home-dir mode bug.
+# /app is root:755 and traversable, so this works without rebuilding the image.
+# Revert to the .cache path once the image chowns /home/voicebox to voicebox.
+Volume=podman-hosting_huggingface-cache:/app/hf
+Environment=HF_HOME=/app/hf
 
 Environment=LOG_LEVEL=info
 # librosa/numba wants a writable cache dir; the app user cannot write the default one.
 Environment=NUMBA_CACHE_DIR=/tmp/numba_cache
 Environment=PYTORCH_CUDA_ALLOC_CONF=garbage_collection_threshold:0.8,max_split_size_mb:512
+
+# This machine runs everything else too — a media stack, a database, several
+# editors. Voicebox's actual job is small (read one paragraph at the end of a
+# turn), so it is configured to be a guest rather than a peer: bounded threads,
+# and nothing kept resident once the talking stops.
+#
+# Return everything after 30 minutes idle. Nothing is exempt: the next utterance
+# after a long gap pays a slow cold load, which is the right trade when the
+# alternative is a gigabyte parked all night for a machine doing other work.
+# Set VOICEBOX_KEEP_WARM_ENGINES=kokoro to keep the narration engine resident.
+Environment=VOICEBOX_IDLE_UNLOAD_SECONDS=1800
+Environment=VOICEBOX_KEEP_WARM_ENGINES=
+# Bounded so torch does not start one thread per visible core. Four is a ceiling
+# on parallelism, not a reservation — CPUWeight decides what it actually gets.
+Environment=VOICEBOX_NUM_THREADS=4
 
 # Declared here rather than relying on the image's HEALTHCHECK: podman builds
 # OCI-format images and silently drops image-level healthchecks.
@@ -38,11 +61,25 @@ HealthStartPeriod=120s
 # Keep the memory cap BELOW the VM's free RAM. A cap the host cannot honour never trips,
 # so the kernel OOM killer picks a victim instead — and it has taken the whole WSL VM
 # down rather than this container. Raise alongside `memory=` in .wslconfig, never ahead.
-PodmanArgs=--memory=5g --cpus=4 --shm-size=1g
+#
+# 3g, not 5g: CPU narration peaks near 1.2 GB, so this leaves generous slack while
+# still being a cap the 9 GB VM can actually honour. A runaway load now kills the
+# container — recoverable — instead of the OOM killer taking the VM with it.
+#
+# No hard CPU cap. A --cpus quota is a ceiling even when the machine is idle, so
+# it slows narration at 3am for no one's benefit; CPUWeight below is the tool that
+# actually matters, because it only bites when something else wants the cores.
+# Measured: 4 cores gave RTF 1.25x, 2 cores 2.35x, so the ceiling was expensive.
+PodmanArgs=--memory=3g --shm-size=1g
 
 [Service]
 Restart=on-failure
 TimeoutStartSec=300
+# Yield to anything interactive. The default weight of 100 makes voicebox an equal
+# claimant on a contended box; at 20 it runs on the cycles nothing else wants, which
+# for end-of-turn narration is indistinguishable from running at full priority.
+CPUWeight=20
+IOWeight=20
 
 [Install]
 WantedBy=default.target

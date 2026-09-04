@@ -17,7 +17,11 @@ done
 # write — model downloads and the SQLite DB then fail. Claim them here, while we
 # still have root. Only fixes the mount roots, so it stays cheap on restarts
 # with a warm model cache.
-for dir in /app/data /app/data/generations /home/voicebox/.cache/huggingface; do
+# /home/voicebox is first on purpose: chowning a directory *under* an
+# untraversable parent succeeds here (this runs as root) and still leaves the app
+# unable to reach it, which surfaces much later as a confusing "Permission denied"
+# on the model cache at import time rather than as a home-directory problem.
+for dir in /home/voicebox /app/data /app/data/generations /home/voicebox/.cache/huggingface; do
     [ -d "$dir" ] || mkdir -p "$dir"
     [ "$(stat -c %u "$dir")" = "$(id -u voicebox)" ] || chown voicebox:voicebox "$dir"
 done

@@ -94,6 +94,23 @@ RUN if [ "$PYTORCH_VARIANT" = "cuda" ]; then \
         > /tmp/pip-constraints.txt; \
     fi
 
+# CPU wheel index. Without this the "cpu" variant is not actually CPU-only: no
+# branch above matches, torch resolves from default PyPI, and that wheel bundles
+# ~2.7GB of nvidia/* CUDA libraries the container can never use. Worse, the
+# current default is 2.13/cu130 — precisely the sm_75+ build the CUDA section
+# above exists to avoid — so the "cpu" image was silently the most dangerous one
+# to point a Pascal host at. Measured before this fix: PYTORCH_VARIANT=cpu
+# produced a 7.64GB image carrying torch 2.13.0+cu130 and a full nvidia/ tree.
+#
+# Making the CPU index primary also keeps the requirements install below on CPU
+# wheels, the same way the rocm and cuda branches do.
+RUN if [ "$PYTORCH_VARIANT" = "cpu" ]; then \
+      pip install --no-cache-dir --prefix=/install \
+        --index-url "https://download.pytorch.org/whl/cpu" \
+        torch torchaudio && \
+      printf '[global]\nindex-url = https://download.pytorch.org/whl/cpu\nextra-index-url = https://pypi.org/simple\n' > /etc/pip.conf; \
+    fi
+
 RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 # k2, for LuxTTS. Without it LuxTTS logs "Failed import k2 ... Swoosh functions
@@ -121,8 +138,16 @@ RUN pip install --no-cache-dir --prefix=/install \
 FROM docker.io/library/python:3.11-slim
 
 # Create non-root user; the entrypoint joins GPU device groups at runtime.
+# The home directory is chowned explicitly because useradd left it root-owned and
+# 0700 here, so uid 999 could not traverse its own home. Everything beneath then
+# became unreadable to the app — including a model-cache volume mounted at
+# ~/.cache/huggingface — and the server died at import in hf_offline_patch with
+# "Permission denied", which reads like a corrupt cache rather than a directory
+# mode. Do not rely on useradd's default.
 RUN groupadd -r voicebox && \
-    useradd -r -g voicebox -m -s /bin/bash voicebox
+    useradd -r -g voicebox -m -s /bin/bash voicebox && \
+    chown voicebox:voicebox /home/voicebox && \
+    chmod 755 /home/voicebox
 
 WORKDIR /app
 
