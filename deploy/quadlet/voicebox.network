@@ -1,9 +1,9 @@
 # Voicebox's own bridge. NOT Internal=true: the backend needs egress to pull models
 # from HuggingFace on first use of an engine.
 #
-# The pod also joins redi-internal (see voicebox.pod) so agent containers there can
-# reach the MCP server. That direction is deliberate — connecting an agent outward to
-# THIS network would hand it the egress it is specifically denied.
+# The pod does not join any agent network today (see voicebox.pod). If one ever needs
+# the MCP server, join Voicebox to that agent's network rather than the agent to this
+# one — this bridge has egress, and agent networks are usually Internal=true on purpose.
 #
 # Source of truth lives in the voicebox repo under deploy/quadlet/; this directory has
 # been regenerated from elsewhere before and lost these files.

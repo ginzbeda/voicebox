@@ -2,7 +2,19 @@
 
 Source of truth for running Voicebox as a systemd-managed service under rootless Podman.
 
-Install:
+Install and run through the scripts — they encode the sequencing that is easy to get wrong
+(see the notes below):
+
+```bash
+./voicebox.sh up          # install units, start, wait for /health
+./voicebox.sh status      # unit states + pod/container + health
+./voicebox.sh restart     # stop, then start (never `systemctl restart`)
+./voicebox.sh down        # stop; models, profiles and database survive
+./voicebox.sh logs -f
+```
+
+`voicebox.sh` is a thin dispatcher; `deploy/quadlet/install.sh` is the implementation and
+takes the finer-grained verbs (`install`, `active`, `installed`, `uninstall`). By hand:
 
 ```bash
 cp deploy/quadlet/voicebox.* ~/.config/containers/systemd/
@@ -25,7 +37,10 @@ originals here makes that a copy away from recovery. Re-copy after any regenerat
 
 - **`restart` does not work.** The pod's `exit-policy stop` tears the pod down when the
   container exits, so `systemctl --user restart voicebox.service` races its own dependency and
-  fails. Use `stop` then `start`.
+  fails. Use `stop` then `start` — which is exactly what `./voicebox.sh restart` does.
+- **`is-active` is not health.** The unit reports active as soon as podman forks, so a
+  container that dies during startup still reads active for a while. `./voicebox.sh up` polls
+  `/health` and fails loudly instead of reporting a success that isn't one.
 - **The image tag matters.** The unit runs `localhost/voicebox:latest`, which is a *tag* on the
   compose-built image. After `podman-compose build`, retag it or you silently redeploy the old
   image:
