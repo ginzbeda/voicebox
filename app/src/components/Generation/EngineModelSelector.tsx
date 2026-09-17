@@ -1,5 +1,7 @@
+import type { TFunction } from 'i18next';
 import { useEffect } from 'react';
 import type { UseFormReturn } from 'react-hook-form';
+import { useTranslation } from 'react-i18next';
 import { FormControl } from '@/components/ui/form';
 import {
   Select,
@@ -120,6 +122,7 @@ interface EngineModelSelectorProps {
 }
 
 export function EngineModelSelector({ form, compact, selectedProfile }: EngineModelSelectorProps) {
+  const { t } = useTranslation();
   const engine = form.watch('engine') || 'qwen';
   const modelSize = form.watch('modelSize');
   const selectValue = getSelectValue(engine, modelSize);
@@ -133,7 +136,7 @@ export function EngineModelSelector({ form, compact, selectedProfile }: EngineMo
     }
   }, [availableOptions, currentEngineAvailable, form]);
 
-  const restrictionHint = getEngineRestrictionHint(selectedProfile);
+  const restrictionHint = getEngineRestrictionHint(selectedProfile, t);
 
   const itemClass = compact ? 'text-xs text-muted-foreground' : undefined;
   const triggerClass = compact
@@ -144,7 +147,10 @@ export function EngineModelSelector({ form, compact, selectedProfile }: EngineMo
     <div className="flex flex-col gap-1">
       <Select value={selectValue} onValueChange={(v) => applyEngineSelection(form, v)}>
         <FormControl>
-          <SelectTrigger className={triggerClass}>
+          <SelectTrigger
+            className={triggerClass}
+            title={compact ? (restrictionHint ?? undefined) : undefined}
+          >
             <SelectValue />
           </SelectTrigger>
         </FormControl>
@@ -162,8 +168,13 @@ export function EngineModelSelector({ form, compact, selectedProfile }: EngineMo
         specific engine — "Vivian" is a Qwen CustomVoice speaker and Chatterbox
         has no idea what she sounds like — so the constraint is real, but the
         user has no way to infer it from an unexplained one-item dropdown.
+
+        The compact form sits in a single-row toolbar, where a paragraph would
+        push every sibling control down, so it carries the hint as a tooltip.
       */}
-      {restrictionHint && <p className="text-xs text-muted-foreground">{restrictionHint}</p>}
+      {restrictionHint && !compact && (
+        <p className="text-xs text-muted-foreground">{restrictionHint}</p>
+      )}
     </div>
   );
 }
@@ -171,19 +182,19 @@ export function EngineModelSelector({ form, compact, selectedProfile }: EngineMo
 /**
  * Explain why the engine list is restricted, or return null when it isn't.
  *
- * Exported so the profile screens can reuse the same wording — the constraint
- * shows up in more than one place and divergent phrasing reads like two
- * different rules.
+ * Takes `t` rather than calling useTranslation so it stays a plain function
+ * that other screens can reuse without diverging wording.
  */
 export function getEngineRestrictionHint(
-  profile?: VoiceProfileResponse | null,
+  profile: VoiceProfileResponse | null | undefined,
+  t: TFunction,
 ): string | null {
   if (!profile) return null;
   if ((profile.voice_type || 'cloned') !== 'preset') return null;
 
   const engine = profile.preset_engine ?? '';
   const engineLabel = PRESET_ENGINE_LABELS[engine] ?? (engine || 'its own engine');
-  return `Preset voices only work with the engine that produced them, so ${profile.name} is locked to ${engineLabel}. Clone a voice from your own audio to use the other engines.`;
+  return t('generation.engineLocked', { name: profile.name, engine: engineLabel });
 }
 
 /** Returns a human-readable description for the currently selected engine. */

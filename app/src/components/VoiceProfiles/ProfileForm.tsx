@@ -277,7 +277,11 @@ export function ProfileForm() {
   const presetEngineToQuery = isCreating
     ? selectedPresetEngine
     : (editingProfile?.preset_engine ?? '');
-  const { data: presetVoicesData } = useQuery({
+  const {
+    data: presetVoicesData,
+    isSuccess: presetVoicesLoaded,
+    isError: presetVoicesFailed,
+  } = useQuery({
     queryKey: ['presetVoices', presetEngineToQuery],
     queryFn: () => apiClient.listPresetVoices(presetEngineToQuery),
     enabled:
@@ -908,9 +912,9 @@ export function ProfileForm() {
                               engines having failed to install.
                             */}
                             <p className="text-xs text-muted-foreground">
-                              Only Kokoro and Qwen CustomVoice ship built-in voices.
-                              The other engines clone from your own audio — use
-                              &ldquo;Clone a voice&rdquo; to reach them.
+                              {t('profileForm.builtin.engineNote', {
+                                cloneLabel: t('profileForm.source.clone'),
+                              })}
                             </p>
                           </FormItem>
 
@@ -921,13 +925,15 @@ export function ProfileForm() {
                               An empty list here means the backend returned no
                               voices — unreachable, or an engine whose presets
                               could not be read. Rendering an empty grid gives no
-                              hint that anything went wrong.
+                              hint that anything went wrong. Only once the
+                              request has settled, though: while it is in flight
+                              the list is empty too, and this would flash on every
+                              engine switch.
                             */}
-                            {presetVoices.length === 0 && (
+                            {(presetVoicesFailed ||
+                              (presetVoicesLoaded && presetVoices.length === 0)) && (
                               <p className="text-sm text-muted-foreground py-4">
-                                No built-in voices came back for this engine. Check
-                                that Voicebox is running and the engine&rsquo;s model
-                                is downloaded in Settings &rarr; Models.
+                                {t('profileForm.builtin.empty')}
                               </p>
                             )}
                             <div className="grid grid-cols-2 gap-1.5 max-h-[340px] overflow-y-auto pr-1">
