@@ -1,5 +1,7 @@
+import type { TFunction } from 'i18next';
 import { useEffect } from 'react';
 import type { UseFormReturn } from 'react-hook-form';
+import { useTranslation } from 'react-i18next';
 import { FormControl } from '@/components/ui/form';
 import {
   Select,
@@ -44,6 +46,12 @@ const ENGLISH_ONLY_ENGINES = new Set(['luxtts', 'chatterbox_turbo']);
 
 /** Engines that support cloned (reference audio) profiles. */
 const CLONING_ENGINES = new Set(['qwen', 'luxtts', 'chatterbox', 'chatterbox_turbo', 'tada']);
+
+/** Display names for the two engines that ship preset voices. */
+const PRESET_ENGINE_LABELS: Record<string, string> = {
+  kokoro: 'Kokoro',
+  qwen_custom_voice: 'Qwen CustomVoice',
+};
 
 function getAvailableOptions(selectedProfile?: VoiceProfileResponse | null) {
   if (!selectedProfile) return ENGINE_OPTIONS;
@@ -114,6 +122,7 @@ interface EngineModelSelectorProps {
 }
 
 export function EngineModelSelector({ form, compact, selectedProfile }: EngineModelSelectorProps) {
+  const { t } = useTranslation();
   const engine = form.watch('engine') || 'qwen';
   const modelSize = form.watch('modelSize');
   const selectValue = getSelectValue(engine, modelSize);
@@ -127,27 +136,65 @@ export function EngineModelSelector({ form, compact, selectedProfile }: EngineMo
     }
   }, [availableOptions, currentEngineAvailable, form]);
 
+  const restrictionHint = getEngineRestrictionHint(selectedProfile, t);
+
   const itemClass = compact ? 'text-xs text-muted-foreground' : undefined;
   const triggerClass = compact
     ? 'h-8 text-xs bg-card border-border rounded-full hover:bg-background/50 transition-all'
     : undefined;
 
   return (
-    <Select value={selectValue} onValueChange={(v) => applyEngineSelection(form, v)}>
-      <FormControl>
-        <SelectTrigger className={triggerClass}>
-          <SelectValue />
-        </SelectTrigger>
-      </FormControl>
-      <SelectContent>
-        {availableOptions.map((opt) => (
-          <SelectItem key={opt.value} value={opt.value} className={itemClass}>
-            {opt.label}
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
+    <div className="flex flex-col gap-1">
+      <Select value={selectValue} onValueChange={(v) => applyEngineSelection(form, v)}>
+        <FormControl>
+          <SelectTrigger
+            className={triggerClass}
+            title={compact ? (restrictionHint ?? undefined) : undefined}
+          >
+            <SelectValue />
+          </SelectTrigger>
+        </FormControl>
+        <SelectContent>
+          {availableOptions.map((opt) => (
+            <SelectItem key={opt.value} value={opt.value} className={itemClass}>
+              {opt.label}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      {/*
+        Without this the list silently collapses to a single entry and looks like
+        the other engines failed to install. A preset voice is produced by one
+        specific engine — "Vivian" is a Qwen CustomVoice speaker and Chatterbox
+        has no idea what she sounds like — so the constraint is real, but the
+        user has no way to infer it from an unexplained one-item dropdown.
+
+        The compact form sits in a single-row toolbar, where a paragraph would
+        push every sibling control down, so it carries the hint as a tooltip.
+      */}
+      {restrictionHint && !compact && (
+        <p className="text-xs text-muted-foreground">{restrictionHint}</p>
+      )}
+    </div>
   );
+}
+
+/**
+ * Explain why the engine list is restricted, or return null when it isn't.
+ *
+ * Takes `t` rather than calling useTranslation so it stays a plain function
+ * that other screens can reuse without diverging wording.
+ */
+export function getEngineRestrictionHint(
+  profile: VoiceProfileResponse | null | undefined,
+  t: TFunction,
+): string | null {
+  if (!profile) return null;
+  if ((profile.voice_type || 'cloned') !== 'preset') return null;
+
+  const engine = profile.preset_engine ?? '';
+  const engineLabel = PRESET_ENGINE_LABELS[engine] ?? (engine || 'its own engine');
+  return t('generation.engineLocked', { name: profile.name, engine: engineLabel });
 }
 
 /** Returns a human-readable description for the currently selected engine. */

@@ -277,7 +277,11 @@ export function ProfileForm() {
   const presetEngineToQuery = isCreating
     ? selectedPresetEngine
     : (editingProfile?.preset_engine ?? '');
-  const { data: presetVoicesData } = useQuery({
+  const {
+    data: presetVoicesData,
+    isSuccess: presetVoicesLoaded,
+    isError: presetVoicesFailed,
+  } = useQuery({
     queryKey: ['presetVoices', presetEngineToQuery],
     queryFn: () => apiClient.listPresetVoices(presetEngineToQuery),
     enabled:
@@ -900,11 +904,38 @@ export function ProfileForm() {
                                 <SelectItem value="qwen_custom_voice">Qwen CustomVoice</SelectItem>
                               </SelectContent>
                             </Select>
+                            {/*
+                              Only these two engines ship a voice library; the other
+                              five clone from reference audio and have nothing to
+                              list. Without saying so, a user with Chatterbox and
+                              LuxTTS installed reads this two-item list as those
+                              engines having failed to install.
+                            */}
+                            <p className="text-xs text-muted-foreground">
+                              {t('profileForm.builtin.engineNote', {
+                                cloneLabel: t('profileForm.source.clone'),
+                              })}
+                            </p>
                           </FormItem>
 
                           {/* Voice picker */}
                           <FormItem>
                             <FormLabel>{t('profileForm.fields.voice')}</FormLabel>
+                            {/*
+                              An empty list here means the backend returned no
+                              voices — unreachable, or an engine whose presets
+                              could not be read. Rendering an empty grid gives no
+                              hint that anything went wrong. Only once the
+                              request has settled, though: while it is in flight
+                              the list is empty too, and this would flash on every
+                              engine switch.
+                            */}
+                            {(presetVoicesFailed ||
+                              (presetVoicesLoaded && presetVoices.length === 0)) && (
+                              <p className="text-sm text-muted-foreground py-4">
+                                {t('profileForm.builtin.empty')}
+                              </p>
+                            )}
                             <div className="grid grid-cols-2 gap-1.5 max-h-[340px] overflow-y-auto pr-1">
                               {presetVoices.map((voice: PresetVoice) => (
                                 <button

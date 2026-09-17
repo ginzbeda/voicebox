@@ -248,7 +248,9 @@
     "builtin": {
       "hint": "Choose a pre-built voice. These don't require an audio sample.",
       "badge": "Built-in Voice",
-      "note": "This profile uses a built-in voice. The voice cannot be changed after creation."
+      "note": "This profile uses a built-in voice. The voice cannot be changed after creation.",
+      "engineNote": "Only Kokoro and Qwen CustomVoice ship built-in voices. The other engines clone from your own audio — use “{{cloneLabel}}” to reach them.",
+      "empty": "No built-in voices came back for this engine. Check that Voicebox is running and the engine’s model is downloaded in Settings → Models."
     },
     "sampleTabs": {
       "upload": "Upload",
@@ -703,6 +705,7 @@
     "voiceSelector": {
       "placeholder": "Select a voice…"
     },
+    "engineLocked": "Preset voices only work with the engine that produced them, so {{name}} is locked to {{engine}}. Clone a voice from your own audio to use the other engines.",
     "effects": {
       "none": "No effects",
       "profileDefault": "Profile default"
