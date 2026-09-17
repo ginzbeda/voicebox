@@ -56,10 +56,21 @@ stop_playback() {
     # such process for the user, so stopping Claude's speech would also kill
     # music in ffplay or a podcast in play. Only descendants of our own scripts
     # are ours to kill.
-    for pid in $(pgrep -f "voicebox-play.sh" 2>/dev/null); do
-        # Negative pid targets the process group, taking the player with it.
-        kill -TERM -- "-$(ps -o pgid= "$pid" 2>/dev/null | tr -d ' ')" 2>/dev/null \
-            || kill -TERM "$pid" 2>/dev/null || true
+    #
+    # Match the script *with its generation-id argument*, not the bare name, or
+    # `vim voicebox-play.sh` would count as playback.
+    local pid pgid
+    for pid in $(pgrep -f 'voicebox-play\.sh [0-9A-Fa-f-]{8,}$' 2>/dev/null); do
+        pgid=$(ps -o pgid= "$pid" 2>/dev/null | tr -d ' ')
+        # Every spawn site uses setsid, so a real play script leads its own
+        # group and the negative pid takes the player with it. Anything that is
+        # not a group leader shares a group with something else — an
+        # interactive shell's job — so kill only the process itself.
+        if [ -n "$pgid" ] && [ "$pgid" = "$pid" ]; then
+            kill -TERM -- "-$pgid" 2>/dev/null || true
+        else
+            kill -TERM "$pid" 2>/dev/null || true
+        fi
     done
     rmdir "$VB_STATE/play.lock" 2>/dev/null || true
 }
@@ -77,28 +88,37 @@ speak_now() {
 }
 
 # /say passes everything as one shell-quoted argument, so the text never gets
-# re-parsed by a shell. Split it here instead.
+# re-parsed by a shell. Split it here instead — with `read -a`, not an unquoted
+# `set -- $1`, which also glob-expands: "what is 2 * 3" became "what is 2" plus
+# every filename in the working directory.
+#
+# Keep the original string too. Splitting collapses whitespace, and prose should
+# reach Voicebox exactly as typed.
+raw=""
 if [ "$#" -eq 1 ]; then
-    # shellcheck disable=SC2086 # deliberate word split of the single argument
-    set -- $1
+    raw="$1"
+    read -r -a words <<< "$1"
+    set -- ${words[@]+"${words[@]}"}
 fi
 
 # A subcommand only counts when it is used as one — `/say stop the build` is a
 # request to speak, not to stop playback. Bare `stop`/`on`/`off` take no
 # arguments, so anything following them means the user meant prose.
+#
+# This is tracked in a variable rather than by prepending a marker word to the
+# arguments: any marker a user can type would be eaten from their prose.
+prose=0
 case "${1:-}" in
     on|off|status|stop|list|test|-h|--help|help)
-        [ "$#" -gt 1 ] && set -- "speak" "$@"
+        [ "$#" -gt 1 ] && prose=1
         ;;
     profile)
         # `profile <name>` is the only subcommand that takes an argument.
-        [ "$#" -gt 2 ] && set -- "speak" "$@"
+        [ "$#" -gt 2 ] && prose=1
         ;;
 esac
-# The synthetic "speak" marker means "everything after this is text".
-if [ "${1:-}" = "speak" ]; then
-    shift
-    text=$(printf '%s\n' "$*" | vb_clean_text)
+if [ "$prose" = 1 ]; then
+    text=$(printf '%s\n' "${raw:-$*}" | vb_clean_text)
     vb_init_state
     require_jq
     [ -n "${text//[[:space:]]/}" ] || { usage; exit 2; }
@@ -114,7 +134,6 @@ require_jq
 
 case "$cmd" in
   on)
-    echo 0 > /dev/null  # keep shellcheck happy about the branch shape
     rm -f "$VB_STATE/enabled"
     vb_breaker_reset
     echo "Speaking enabled."
@@ -201,8 +220,16 @@ case "$cmd" in
     # default_engine and default_personality unconditionally from the body.
     # Read the existing row first and merge, or setting a voice silently wipes
     # this client's engine and personality settings.
-    existing=$(api GET /mcp/bindings | jq -c --arg c "$VB_CLIENT_ID" \
-        '.items[]? | select(.client_id==$c)' 2>/dev/null)
+    #
+    # A failed read must abort, not fall through as "no existing binding": that
+    # would PUT nulls over the very fields this merge exists to preserve.
+    bindings=$(api GET /mcp/bindings)
+    if ! printf '%s' "$bindings" | jq -e '.items | type == "array"' >/dev/null 2>&1; then
+        echo "Could not read current bindings from $VB_BASE; not changing the voice."
+        exit 1
+    fi
+    existing=$(printf '%s' "$bindings" | jq -c --arg c "$VB_CLIENT_ID" \
+        '.items[] | select(.client_id==$c)')
     body=$(jq -nc \
         --arg client_id "$VB_CLIENT_ID" \
         --arg profile_id "$pid" \
@@ -236,8 +263,7 @@ case "$cmd" in
 
   *)
     # Anything else is text to speak. Explicit intent, so it ignores the toggle.
-    text="$cmd $*"
-    text=$(printf '%s\n' "$text" | vb_clean_text)
+    text=$(printf '%s\n' "${raw:-$cmd $*}" | vb_clean_text)
     [ -n "${text//[[:space:]]/}" ] || { usage; exit 2; }
     speak_now "$text" || exit 1
     ;;

@@ -39,6 +39,8 @@ class _Recorder:
         self.puts: list[dict] = []
         self.speaks: list[dict] = []
         self.bindings: list[dict] = []
+        # When set, GET /mcp/bindings answers with this status and no JSON body.
+        self.bindings_error: int | None = None
         self.url = ""
 
 
@@ -66,6 +68,11 @@ def voicebox():
             if self.path == "/profiles":
                 return self._json(PROFILES)
             if self.path == "/mcp/bindings":
+                if recorder.bindings_error:
+                    self.send_response(recorder.bindings_error)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return None
                 return self._json({"items": recorder.bindings})
             if self.path == "/health":
                 return self._json({"status": "healthy", "gpu_type": "CUDA"})
@@ -107,8 +114,10 @@ def env(tmp_path: Path, voicebox):
     }
 
 
-def run(env: dict, *args: str):
-    return subprocess.run([str(VOICECTL), *args], capture_output=True, text=True, env=env, timeout=30)
+def run(env: dict, *args: str, cwd: Path | None = None):
+    return subprocess.run(
+        [str(VOICECTL), *args], capture_output=True, text=True, env=env, timeout=30, cwd=cwd
+    )
 
 
 # ─── profile: the full-replace footgun ─────────────────────────────────────
@@ -180,6 +189,15 @@ def test_unknown_profile_lists_the_options(env, voicebox):
     assert "Morgan" in result.stdout
     assert "Scarlett" in result.stdout
     assert voicebox.puts == []
+
+
+def test_profile_aborts_when_existing_bindings_cannot_be_read(env, voicebox):
+    """Treating a failed GET as "no binding yet" would PUT nulls over the very
+    fields the merge exists to preserve."""
+    voicebox.bindings_error = 500
+    result = run(env, "profile", "Morgan")
+    assert result.returncode == 1
+    assert voicebox.puts == [], "a PUT was sent without the existing binding"
 
 
 def test_profile_requires_a_name(env):
@@ -352,21 +370,96 @@ def test_text_with_shell_metacharacters_is_spoken_literally(env, voicebox):
     assert "rm -rf /tmp/nope" in spoken
 
 
+def _spawn(argv: list[str], **kwargs) -> subprocess.Popen:
+    return subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kwargs)
+
+
+def _reap(proc: subprocess.Popen) -> None:
+    import signal
+
+    if proc.poll() is None:
+        proc.send_signal(signal.SIGKILL)
+    proc.wait(timeout=5)
+
+
 def test_stop_does_not_kill_unrelated_audio_players(env, tmp_path):
     """`pkill -x ffplay` matched every such process for the user, so /say stop
-    also killed music playing in another window."""
-    import signal
+    also killed music playing in another window. The bystander really is named
+    ffplay, so a regression to name-based killing fails here."""
     import time
 
-    bystander = subprocess.Popen(
-        ["sleep", "30"],
-        start_new_session=True,
-    )
-    # Rename-by-symlink so it looks like a player without being one of ours.
+    ffplay = tmp_path / "ffplay"
+    ffplay.symlink_to(subprocess.run(["which", "sleep"], capture_output=True, text=True).stdout.strip())
+    bystander = _spawn([str(ffplay), "30"], start_new_session=True)
     try:
+        time.sleep(0.2)
+        assert subprocess.run(["pgrep", "-x", "ffplay"], capture_output=True).returncode == 0
         run(env, "stop")
         time.sleep(0.5)
-        assert bystander.poll() is None, "an unrelated process was killed"
+        assert bystander.poll() is None, "an unrelated ffplay was killed"
     finally:
-        bystander.send_signal(signal.SIGKILL)
-        bystander.wait(timeout=5)
+        _reap(bystander)
+
+
+def test_stop_ignores_processes_that_merely_mention_the_play_script(env, tmp_path):
+    """`vim voicebox-play.sh` is not playback. Its command line names the script
+    but carries no generation id."""
+    import time
+
+    # The trailing `; :` stops bash exec-ing sleep directly, which would drop
+    # "voicebox-play.sh" from the command line and make this test pass vacuously.
+    editor = _spawn(["bash", "-c", "sleep 30; :", "voicebox-play.sh"], start_new_session=True)
+    try:
+        time.sleep(0.2)
+        assert subprocess.run(
+            ["pgrep", "-f", "voicebox-play.sh"], capture_output=True
+        ).returncode == 0, "bystander does not look like the script; test would be vacuous"
+        run(env, "stop")
+        time.sleep(0.5)
+        assert editor.poll() is None, "a process that only named the script was killed"
+    finally:
+        _reap(editor)
+
+
+def test_stop_kills_a_real_play_script_and_its_player(env, tmp_path):
+    """The positive case: without it, a stop that kills nothing passes both
+    tests above."""
+    import time
+
+    script = tmp_path / "voicebox-play.sh"
+    child_pid = tmp_path / "child.pid"
+    script.write_text(f"#!/usr/bin/env bash\nsleep 30 &\necho $! > {child_pid}\nwait\n")
+    script.chmod(0o755)
+    play = _spawn([str(script), "0f8e2c1a-1b2c-4d5e-8f90-123456789abc"], start_new_session=True)
+    try:
+        for _ in range(50):
+            if child_pid.exists() and child_pid.read_text().strip():
+                break
+            time.sleep(0.05)
+        player = int(child_pid.read_text())
+        run(env, "stop")
+        play.wait(timeout=5)
+        time.sleep(0.2)
+        with pytest.raises(ProcessLookupError):
+            os.kill(player, 0)
+    finally:
+        _reap(play)
+
+
+def test_text_with_glob_characters_is_not_expanded(env, voicebox, tmp_path):
+    """The single argument used to be split with an unquoted `set -- $1`, which
+    also glob-expands: `?` and `[...]` matched files in the working directory and
+    their names were spoken instead."""
+    (tmp_path / "ready1").write_text("")
+    (tmp_path / "d").write_text("")
+    result = run(env, "is it ready? see [draft]", cwd=tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert voicebox.speaks[0]["text"] == "is it ready? see [draft]"
+
+
+def test_prose_starting_with_speak_keeps_every_word(env, voicebox):
+    """`speak` used to be an internal marker, so it was silently dropped from
+    the front of anything the user said."""
+    result = run(env, "speak up please")
+    assert result.returncode == 0
+    assert voicebox.speaks[0]["text"] == "speak up please"
